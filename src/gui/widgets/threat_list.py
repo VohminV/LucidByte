@@ -1,59 +1,78 @@
-from PySide6.QtWidgets import QListWidget, QListWidgetItem, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor
 
-class ThreatList(QWidget):
+class ThreatList(QTreeWidget):
+    """Список обнаруженных угроз безопасности"""
+    
     def __init__(self):
         super().__init__()
-        self.setup_interface()
-
-    def setup_interface(self):
-        layout = QVBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
+        self.setHeaderLabels(["Risk", "Description", "File"])
+        self.setColumnWidth(0, 80)
+        self.setColumnWidth(1, 300)
+        self.setColumnWidth(2, 400)
+        self.setAlternatingRowColors(True)
+        self.setStyleSheet("""
+            QTreeWidget {
+                background: #1e1e1e;
+                color: #ffffff;
+                border: 1px solid #333333;
+                border-radius: 4px;
+            }
+            QTreeWidget::item {
+                padding: 4px;
+            }
+            QTreeWidget::item:hover {
+                background: #2d2d2d;
+            }
+            QTreeWidget::item:selected {
+                background: #4A90D9;
+            }
+            QHeaderView::section {
+                background: #2d2d2d;
+                color: #ffffff;
+                padding: 4px;
+                border: 1px solid #333333;
+            }
+        """)
+    
+    def add_threat(self, risk: str, description: str, file_path: str):
+        """Добавление одной угрозы"""
+        item = QTreeWidgetItem([risk, description, file_path])
         
-        # Заголовок списка
-        header_label = QLabel("Обнаруженные угрозы")
-        header_label.setFont(QFont("Arial", 11, QFont.Bold))
-        header_label.setStyleSheet("color: #ff6b6b; padding: 5px;")
-        layout.addWidget(header_label)
+        # Цветовая кодировка по уровню риска
+        colors = {
+            "Critical": QColor("#ff0000"),
+            "High": QColor("#ff6b6b"),
+            "Medium": QColor("#ffa500"),
+            "Low": QColor("#90ee90")
+        }
         
-        # Список угроз
-        self.threat_list = QListWidget()
-        self.threat_list.setAlternatingRowColors(True)
-        layout.addWidget(self.threat_list)
+        if risk in colors:
+            item.setForeground(0, colors[risk])
         
-        self.setLayout(layout)
-
-    def load_threats(self, threats: list):
-        self.threat_list.clear()
-        
+        self.addTopLevelItem(item)
+    
+    def add_threats(self, threats: list):
+        """Добавление списка угроз"""
+        self.clear()
         for threat in threats:
-            item = QListWidgetItem()
-            
-            risk_level = threat.get("risk_level", 0)
-            threat_name = threat.get("name", "Неизвестная угроза")
-            threat_category = threat.get("category", "Неизвестно")
-            
-            item.setText(f"[{threat_category}] {threat_name}")
-            
-            # Цветовое кодирование по уровню риска
-            if risk_level >= 8:
-                item.setBackground(QColor("#ff6b6b"))
-                item.setForeground(QColor("#ffffff"))
-            elif risk_level >= 5:
-                item.setBackground(QColor("#ffa500"))
-                item.setForeground(QColor("#000000"))
-            else:
-                item.setBackground(QColor("#90ee90"))
-                item.setForeground(QColor("#000000"))
-            
-            self.threat_list.addItem(item)
-
-    def get_selected_threat(self) -> dict:
-        selected_items = self.threat_list.selectedItems()
-        if selected_items:
-            return {"name": selected_items[0].text()}
-        return {}
-
-    def clear_threats(self):
-        self.threat_list.clear()
+            self.add_threat(
+                threat.get("risk", "Low"),
+                threat.get("desc", "Unknown"),
+                threat.get("file", "Unknown")
+            )
+        self.resizeColumnToContents(0)
+    
+    def get_threat_count(self):
+        """Получение количества угроз"""
+        return self.topLevelItemCount()
+    
+    def get_critical_count(self):
+        """Получение количества критических угроз"""
+        count = 0
+        for i in range(self.topLevelItemCount()):
+            item = self.topLevelItem(i)
+            if item and item.text(0) == "Critical":
+                count += 1
+        return count

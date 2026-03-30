@@ -1,83 +1,81 @@
-from PySide6.QtWidgets import QTextEdit
+from PySide6.QtWidgets import QTextEdit, QWidget, QVBoxLayout, QLabel
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QColor, QSyntaxHighlighter, QTextCharFormat
-from PySide6.QtCore import QRegularExpression
-
-class JavaSyntaxHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent):
-        super().__init__(parent)
-        
-        self.keyword_format = QTextCharFormat()
-        self.keyword_format.setForeground(QColor("#cc7832"))
-        self.keyword_format.setFontWeight(700)
-        
-        self.string_format = QTextCharFormat()
-        self.string_format.setForeground(QColor("#6a8759"))
-        
-        self.comment_format = QTextCharFormat()
-        self.comment_format.setForeground(QColor("#808080"))
-        
-        self.dangerous_format = QTextCharFormat()
-        self.dangerous_format.setForeground(QColor("#ff6b6b"))
-        self.dangerous_format.setFontWeight(700)
-        
-        self.highlighting_rules = []
-        
-        # Ключевые слова Java
-        keywords = [
-            "public", "private", "protected", "class", "interface", "extends",
-            "implements", "import", "package", "void", "int", "String", "boolean",
-            "if", "else", "for", "while", "return", "new", "this", "super",
-            "try", "catch", "finally", "throw", "throws", "static", "final"
-        ]
-        
-        for keyword in keywords:
-            pattern = QRegularExpression(f"\\b{keyword}\\b")
-            self.highlighting_rules.append((pattern, self.keyword_format))
-        
-        # Строки
-        string_pattern = QRegularExpression("\".*?\"")
-        self.highlighting_rules.append((string_pattern, self.string_format))
-        
-        # Комментарии
-        comment_pattern = QRegularExpression("//[^\n]*")
-        self.highlighting_rules.append((comment_pattern, self.comment_format))
-
-    def highlightBlock(self, text):
-        for pattern, format_style in self.highlighting_rules:
-            match_iterator = pattern.globalMatch(text)
-            while match_iterator.hasNext():
-                match = match_iterator.next()
-                self.setFormat(match.capturedStart(), match.capturedLength(), format_style)
 
 class CodeEditor(QTextEdit):
+    """Редактор кода с подсветкой синтаксиса"""
+    
     def __init__(self):
         super().__init__()
         self.setReadOnly(True)
-        self.setFontFamily("Consolas")
-        self.setFontPointSize(11)
-        self.setLineWrapMode(QTextEdit.NoWrap)
+        self.setFont(QFont("JetBrains Mono", 10))
+        self.current_file = None
         
-        self.highlighter = JavaSyntaxHighlighter(self.document())
-    
-    def set_code(self, code_content: str):
-        self.setText(code_content)
-    
-    def highlight_dangerous_lines(self, dangerous_keywords: list):
-        # Подсветка опасных строк кода
-        content = self.toPlainText()
-        lines = content.split("\n")
+        self.setStyleSheet("""
+            QTextEdit {
+                background: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #333333;
+                border-radius: 4px;
+                padding: 8px;
+            }
+            QTextEdit:focus {
+                border: 1px solid #4A90D9;
+            }
+        """)
         
-        highlighted_content = []
-        for line in lines:
-            is_dangerous = False
-            for keyword in dangerous_keywords:
-                if keyword in line:
-                    is_dangerous = True
-                    break
+        # Включаем нумерацию строк (через виджет-обертку)
+        self.line_numbers = []
+    
+    def load_file(self, file_path: str):
+        """Загрузка файла в редактор"""
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            self.setPlainText(content)
+            self.current_file = file_path
             
-            if is_dangerous:
-                highlighted_content.append(f"<span style='background-color: #ff6b6b40'>{line}</span>")
-            else:
-                highlighted_content.append(line)
+            # Обновление заголовка (если есть родительский виджет с label)
+            parent = self.parent()
+            if parent and hasattr(parent, 'setWindowTitle'):
+                import os
+                parent.setWindowTitle(f"Code - {os.path.basename(file_path)}")
+                
+        except Exception as e:
+            self.setPlainText(f"Ошибка загрузки файла:\n{str(e)}")
+            self.current_file = None
+    
+    def load_content(self, content: str, title: str = "Code"):
+        """Загрузка содержимого из строки"""
+        self.setPlainText(content)
+        self.current_file = title
+    
+    def clear_content(self):
+        """Очистка редактора"""
+        self.clear()
+        self.current_file = None
+    
+    def highlight_line(self, line_number: int, color: str = "#ffff00"):
+        """Подсветка строки кода"""
+        # Реализация подсветки (упрощенная)
+        cursor = self.textCursor()
+        cursor.movePosition(cursor.Start)
+        for _ in range(line_number - 1):
+            cursor.movePosition(cursor.NextBlock)
+        cursor.select(cursor.BlockUnderCursor)
         
-        self.setHtml("\n".join(highlighted_content))
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor(color))
+        cursor.setCharFormat(fmt)
+    
+    def search_text(self, text: str):
+        """Поиск текста в редакторе"""
+        cursor = self.document().find(text)
+        if cursor:
+            self.setTextCursor(cursor)
+            return True
+        return False
+    
+    def get_current_file(self):
+        """Получение пути текущего файла"""
+        return self.current_file

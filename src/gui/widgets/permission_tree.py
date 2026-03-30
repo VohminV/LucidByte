@@ -1,41 +1,76 @@
 from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 
 class PermissionTree(QTreeWidget):
+    """Дерево разрешений Android приложения"""
+    
     def __init__(self):
         super().__init__()
-        self.setHeaderLabel("Разрешения приложения")
+        self.setHeaderLabels(["Permission", "Risk Level"])
+        self.setColumnWidth(0, 400)
+        self.setColumnWidth(1, 100)
         self.setAlternatingRowColors(True)
+        self.setStyleSheet("""
+            QTreeWidget {
+                background: #1e1e1e;
+                color: #ffffff;
+                border: 1px solid #333333;
+                border-radius: 4px;
+            }
+            QTreeWidget::item {
+                padding: 4px;
+            }
+            QTreeWidget::item:hover {
+                background: #2d2d2d;
+            }
+            QTreeWidget::item:selected {
+                background: #4A90D9;
+            }
+            QHeaderView::section {
+                background: #2d2d2d;
+                color: #ffffff;
+                padding: 4px;
+                border: 1px solid #333333;
+            }
+        """)
+    
+    def add_permission(self, name: str, risk: str):
+        """Добавление одного разрешения"""
+        item = QTreeWidgetItem([name, risk])
         
-        self.suspicious_category = None
-        self.normal_category = None
-
-    def load_permissions(self, permissions: list, suspicious_permissions: list):
+        colors = {
+            "Critical": QColor("#ff0000"),
+            "High": QColor("#ff6b6b"),
+            "Medium": QColor("#ffa500"),
+            "Low": QColor("#90ee90")
+        }
+        
+        if risk in colors:
+            item.setForeground(0, colors[risk])
+            item.setForeground(1, colors[risk])
+        
+        self.addTopLevelItem(item)
+    
+    def add_permissions(self, permissions: list):
+        """Добавление списка разрешений"""
         self.clear()
-        
-        self.suspicious_category = QTreeWidgetItem(["⚠ Подозрительные разрешения"])
-        self.suspicious_category.setForeground(0, Qt.red)
-        self.addTopLevelItem(self.suspicious_category)
-        
-        for permission in suspicious_permissions:
-            item = QTreeWidgetItem([f"android.permission.{permission}"])
-            item.setForeground(0, Qt.red)
-            self.suspicious_category.addChild(item)
-        
-        self.normal_category = QTreeWidgetItem(["✓ Обычные разрешения"])
-        self.normal_category.setForeground(0, Qt.green)
-        self.addTopLevelItem(self.normal_category)
-        
-        normal_list = [p for p in permissions if p not in suspicious_permissions]
-        for permission in normal_list:
-            item = QTreeWidgetItem([f"android.permission.{permission}"])
-            item.setForeground(0, Qt.green)
-            self.normal_category.addChild(item)
-        
-        self.expandAll()
-
-    def get_selected_permission(self) -> str:
-        selected_items = self.selectedItems()
-        if selected_items:
-            return selected_items[0].text(0)
-        return ""
+        for perm in permissions:
+            self.add_permission(
+                perm.get("name", "Unknown"),
+                perm.get("risk", "Low")
+            )
+        self.resizeColumnToContents(1)
+    
+    def get_permission_count(self):
+        """Получение количества разрешений"""
+        return self.topLevelItemCount()
+    
+    def get_dangerous_count(self):
+        """Получение количества опасных разрешений"""
+        count = 0
+        for i in range(self.topLevelItemCount()):
+            item = self.topLevelItem(i)
+            if item and item.text(1) in ["Critical", "High"]:
+                count += 1
+        return count
