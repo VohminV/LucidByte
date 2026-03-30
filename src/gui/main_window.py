@@ -1,9 +1,10 @@
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QSplitter, QMenuBar, QMenu, QFileDialog,
-    QStatusBar, QProgressBar, QLabel, QGroupBox
+    QSplitter, QFileDialog, QStatusBar, QProgressBar,
+    QLabel, QTabWidget, QTextEdit, QDockWidget,
+    QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsLineItem
 )
-from PySide6.QtGui import QAction, QFont
+from PySide6.QtGui import QAction, QFont, QPen, QBrush
 from PySide6.QtCore import Qt
 import qdarkstyle
 
@@ -13,6 +14,51 @@ from src.gui.widgets.threat_list import ThreatList
 from src.gui.widgets.ai_chat import AiChatWidget
 
 
+# ================= CALL GRAPH VIEW =================
+class CallGraphView(QGraphicsView):
+    def __init__(self):
+        super().__init__()
+        self.scene = QGraphicsScene(self)
+        self.setScene(self.scene)
+        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setRenderHint(self.renderHints())
+
+    def draw_graph(self, graph_data):
+        self.scene.clear()
+
+        positions = {}
+        radius = 20
+        spacing = 120
+
+        # Position nodes
+        for i, node in enumerate(graph_data.keys()):
+            x = (i % 5) * spacing
+            y = (i // 5) * spacing
+            positions[node] = (x, y)
+
+        # Draw nodes
+        for node, (x, y) in positions.items():
+            circle = QGraphicsEllipseItem(x, y, radius, radius)
+            circle.setBrush(QBrush(Qt.blue))
+            circle.setToolTip(node)
+            self.scene.addItem(circle)
+
+        # Draw edges
+        pen = QPen(Qt.white)
+        for src, targets in graph_data.items():
+            for dst in targets:
+                if dst in positions:
+                    x1, y1 = positions[src]
+                    x2, y2 = positions[dst]
+                    line = QGraphicsLineItem(
+                        x1 + radius/2, y1 + radius/2,
+                        x2 + radius/2, y2 + radius/2
+                    )
+                    line.setPen(pen)
+                    self.scene.addItem(line)
+
+
+# ================= MAIN WINDOW =================
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -21,6 +67,7 @@ class MainWindow(QMainWindow):
 
         self.setup_menu()
         self.setup_interface()
+        self.setup_docks()
         self.setup_status_bar()
         self.apply_style()
 
@@ -28,217 +75,130 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
 
         file_menu = menu_bar.addMenu("Файл")
-
-        open_action = QAction("Открыть APK файл", self)
-        open_action.setShortcut("Ctrl+O")
+        open_action = QAction("Открыть APK", self)
         open_action.triggered.connect(self.open_apk_file)
         file_menu.addAction(open_action)
 
         file_menu.addSeparator()
-
-        exit_action = QAction("Выход", self)
-        exit_action.setShortcut("Ctrl+Q")
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
+        file_menu.addAction("Выход", self.close)
 
         analysis_menu = menu_bar.addMenu("Анализ")
-
-        start_analysis_action = QAction("Запустить полный анализ", self)
-        start_analysis_action.setShortcut("F5")
-        start_analysis_action.triggered.connect(self.start_analysis)
-        analysis_menu.addAction(start_analysis_action)
-
-        help_menu = menu_bar.addMenu("Помощь")
-
-        about_action = QAction("О программе", self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
+        analysis_menu.addAction("Запустить анализ", self.start_analysis)
 
     def setup_interface(self):
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
 
-        main_layout = QVBoxLayout()
-        central_widget.setLayout(main_layout)
+        # ===== AI SUMMARY =====
+        self.ai_summary = QLabel("AI Summary: ожидается анализ...")
+        self.ai_summary.setStyleSheet("background:#1e1e1e; padding:8px; border-radius:6px;")
+        layout.addWidget(self.ai_summary)
 
-        # ===== TOP INFO PANEL =====
-        info_widget = QWidget()
-        info_widget.setStyleSheet("""
-            QWidget {
-                background-color: #2b2b2b;
-                border: 1px solid #3c3c3c;
-                border-radius: 6px;
-                padding: 6px;
-            }
-        """)
-
-        info_layout = QHBoxLayout()
-        info_widget.setLayout(info_layout)
-
-        self.file_label = QLabel("Файл не загружен")
-        self.file_label.setFont(QFont("Arial", 10))
-
-        self.risk_label = QLabel("Уровень риска: Не определен")
-        self.risk_label.setFont(QFont("Arial", 10, QFont.Bold))
-
-        info_layout.addWidget(self.file_label)
-        info_layout.addStretch()
-        info_layout.addWidget(self.risk_label)
-
-        main_layout.addWidget(info_widget)
-
-        # ===== MAIN SPLITTER =====
         splitter = QSplitter(Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
+        layout.addWidget(splitter)
 
         # ===== LEFT PANEL =====
-        left_panel = QWidget()
-        left_layout = QVBoxLayout()
-        left_panel.setLayout(left_layout)
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
 
         self.permission_tree = PermissionTree()
         self.threat_list = ThreatList()
 
-        permission_group = QGroupBox("Разрешения Android")
-        perm_layout = QVBoxLayout()
-        perm_layout.addWidget(self.permission_tree)
-        permission_group.setLayout(perm_layout)
+        left_layout.addWidget(QLabel("Permissions"))
+        left_layout.addWidget(self.permission_tree)
+        left_layout.addWidget(QLabel("Threats"))
+        left_layout.addWidget(self.threat_list)
 
-        threat_group = QGroupBox("Обнаруженные угрозы")
-        threat_layout = QVBoxLayout()
-        threat_layout.addWidget(self.threat_list)
-        threat_group.setLayout(threat_layout)
+        splitter.addWidget(left)
 
-        left_layout.addWidget(permission_group)
-        left_layout.addWidget(threat_group)
-
-        splitter.addWidget(left_panel)
-
-        # ===== CENTER PANEL =====
-        center_panel = QWidget()
-        center_layout = QVBoxLayout()
-        center_panel.setLayout(center_layout)
+        # ===== CENTER TABS =====
+        self.tabs = QTabWidget()
 
         self.code_editor = CodeEditor()
+        self.manifest_view = QTextEdit()
+        self.smali_view = QTextEdit()
+        self.strings_view = QTextEdit()
+        self.resources_view = QTextEdit()
 
-        code_group = QGroupBox("Декомпилированный код / Smali / Java")
-        code_layout = QVBoxLayout()
-        code_layout.addWidget(self.code_editor)
-        code_group.setLayout(code_layout)
+        self.tabs.addTab(self.code_editor, "Code")
+        self.tabs.addTab(self.manifest_view, "Manifest")
+        self.tabs.addTab(self.smali_view, "Smali")
+        self.tabs.addTab(self.strings_view, "Strings")
+        self.tabs.addTab(self.resources_view, "Resources")
 
-        center_layout.addWidget(code_group)
-
-        splitter.addWidget(center_panel)
+        splitter.addWidget(self.tabs)
 
         # ===== RIGHT PANEL =====
-        right_panel = QWidget()
-        right_layout = QVBoxLayout()
-        right_panel.setLayout(right_layout)
-
         self.ai_chat = AiChatWidget()
-        self.ai_chat.message_sent.connect(self.handle_ai_message)
+        splitter.addWidget(self.ai_chat)
 
-        ai_group = QGroupBox("AI Анализатор")
-        ai_layout = QVBoxLayout()
-        ai_layout.addWidget(self.ai_chat)
-        ai_group.setLayout(ai_layout)
+        splitter.setSizes([300, 900, 400])
 
-        right_layout.addWidget(ai_group)
+    def setup_docks(self):
+        # ===== LOG PANEL =====
+        self.log_dock = QDockWidget("Logs", self)
+        self.log_widget = QTextEdit()
+        self.log_widget.setReadOnly(True)
+        self.log_dock.setWidget(self.log_widget)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
 
-        splitter.addWidget(right_panel)
-
-        splitter.setSizes([400, 800, 400])
-
-        main_layout.addWidget(splitter)
+        # ===== CALL GRAPH =====
+        self.graph_dock = QDockWidget("Call Graph", self)
+        self.graph_view = CallGraphView()
+        self.graph_dock.setWidget(self.graph_view)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.graph_dock)
 
     def setup_status_bar(self):
-        self.status_bar = QStatusBar()
-        self.setStatusBar(self.status_bar)
+        self.status = QStatusBar()
+        self.setStatusBar(self.status)
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setMaximumWidth(200)
-        self.progress_bar.setVisible(False)
-        self.status_bar.addPermanentWidget(self.progress_bar)
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        self.status.addPermanentWidget(self.progress)
 
-        self.status_label = QLabel("Готов к работе")
-        self.status_bar.addWidget(self.status_label)
+        self.status_label = QLabel("Ready")
+        self.status.addWidget(self.status_label)
 
     def apply_style(self):
-        self.setStyleSheet(qdarkstyle.load_stylesheet() + """
-            QSplitter::handle {
-                background-color: #444;
-                width: 3px;
-            }
-            QSplitter::handle:hover {
-                background-color: #00aaff;
-            }
-            QProgressBar {
-                border: 1px solid #3c3c3c;
-                border-radius: 5px;
-                text-align: center;
-                height: 12px;
-            }
-            QProgressBar::chunk {
-                background-color: #00aaff;
-                border-radius: 5px;
-            }
-        """)
-
-        app_font = QFont("JetBrains Mono", 10)
-        self.setFont(app_font)
-        self.code_editor.setFont(QFont("JetBrains Mono", 11))
+        self.setStyleSheet(qdarkstyle.load_stylesheet())
+        self.setFont(QFont("JetBrains Mono", 10))
 
     def open_apk_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Выберите APK файл",
-            "",
-            "APK файлы (*.apk);;JAR файлы (*.jar);;Все файлы (*.*)"
-        )
-
-        if file_path:
-            self.file_label.setText(f"Файл: {file_path}")
-            self.status_label.setText(f"Загружен файл: {file_path}")
+        path, _ = QFileDialog.getOpenFileName(self, "Open APK")
+        if path:
+            self.status_label.setText(f"Loaded: {path}")
+            self.log(f"APK loaded: {path}")
+            self.load_demo_graph()
 
     def start_analysis(self):
-        self.status_label.setText("Запуск анализа...")
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)
+        self.status_label.setText("Analyzing...")
+        self.log("Analysis started")
 
-    def handle_ai_message(self, message: str):
-        self.status_label.setText("AI обрабатывает запрос...")
+    def log(self, text):
+        self.log_widget.append(text)
 
-    def show_about(self):
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.about(
-            self,
-            "О программе LucidByte",
-            "LucidByte\n\n"
-            "Инструмент анализа вредоносного ПО Android\n"
-            "Статический и AI анализ APK файлов."
-        )
+    def set_ai_summary(self, text):
+        self.ai_summary.setText(f"AI Summary: {text}")
 
-    def update_risk_display(self, risk_score: int):
-        if risk_score >= 8:
-            color = "#ff0000"
-        elif risk_score >= 6:
-            color = "#ff6b6b"
-        elif risk_score >= 4:
-            color = "#ffa500"
-        else:
-            color = "#90ee90"
+    def update_threat_level(self, item, level):
+        colors = {
+            "Critical": "#ff0000",
+            "High": "#ff6b6b",
+            "Medium": "#ffa500",
+            "Low": "#90ee90"
+        }
+        item.setForeground(0, colors.get(level, "white"))
 
-        self.risk_label.setText(f"Уровень риска: {risk_score}/10")
-        self.risk_label.setStyleSheet(f"""
-            QLabel {{
-                color: white;
-                background-color: {color};
-                padding: 4px 12px;
-                border-radius: 8px;
-                font-weight: bold;
-            }}
-        """)
-
-    def set_analysis_complete(self):
-        self.progress_bar.setVisible(False)
-        self.status_label.setText("Анализ завершен")
+    # ===== DEMO GRAPH =====
+    def load_demo_graph(self):
+        graph = {
+            "MainActivity.onCreate": ["initUI", "loadData"],
+            "initUI": ["setupButtons"],
+            "loadData": ["fetchFromServer"],
+            "fetchFromServer": [],
+            "setupButtons": []
+        }
+        self.graph_view.draw_graph(graph)
