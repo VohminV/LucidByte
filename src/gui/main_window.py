@@ -708,3 +708,66 @@ class MainWindow(QMainWindow):
                 event.ignore()
         else:
             event.accept()
+            
+    def show_statistics(self):
+        """Отображение детальной статистики анализа"""
+        if not hasattr(self, 'analysis_worker') or not self.analysis_worker:
+            QMessageBox.information(self, "Статистика", "Нет данных для отображения")
+            return
+        
+        stats = self.analysis_worker.engine.get_statistics()
+        
+        # Формирование текста статистики
+        stat_text = f"""
+        ════════════════════════════════════════════════════════════
+        📊 LUCIDBYTE ANALYSIS STATISTICS
+        ════════════════════════════════════════════════════════════
+        
+        📁 ФАЙЛЫ
+        ────────────────────────────────────────────────────────────
+        Java файлов:     {stats.get('total_java_files', 0):>10,}
+        XML файлов:      {stats.get('total_xml_files', 0):>10,}
+        DEX файлов:      {stats.get('total_dex_files', 0):>10,}
+        Всего файлов:    {stats.get('total_files', 0):>10,}
+        
+        ⚠ УГРОЗЫ
+        ────────────────────────────────────────────────────────────
+        Всего угроз:     {stats.get('total_threats', 0):>10,}
+        🔴 Critical:     {stats.get('critical_threats', 0):>10}
+        🟠 High:         {stats.get('high_threats', 0):>10}
+        🟡 Medium:       {stats.get('medium_threats', 0):>10}
+        🟢 Low:          {stats.get('low_threats', 0):>10}
+        
+        🔐 РАЗРЕШЕНИЯ
+        ────────────────────────────────────────────────────────────
+        Всего:           {stats.get('total_permissions', 0):>10}
+        Опасные:         {stats.get('dangerous_permissions', 0):>10}
+        
+        📦 ИНФОРМАЦИЯ О ПРИЛОЖЕНИИ
+        ────────────────────────────────────────────────────────────
+        Пакет:           {stats.get('package_name', 'N/A')}
+        Версия:          {stats.get('version_name', 'N/A')}
+        Размер APK:      {stats.get('apk_size_mb', 0):>10.2f} MB
+        Мин. SDK:        {stats.get('min_sdk', 'N/A')}
+        Целевой SDK:     {stats.get('target_sdk', 'N/A')}
+        
+        ════════════════════════════════════════════════════════════
+        """
+        
+        # Категории угроз
+        threat_cats = stats.get('threat_categories', {})
+        if threat_cats:
+            stat_text += "\n📊 КАТЕГОРИИ УГРОЗ\n"
+            stat_text += "─" * 60 + "\n"
+            for cat, count in sorted(threat_cats.items(), key=lambda x: -x[1])[:10]:
+                stat_text += f"  {cat:<35} {count:>5}\n"
+        
+        # Категории разрешений
+        perm_cats = stats.get('permission_categories', {})
+        if perm_cats:
+            stat_text += "\n📊 КАТЕГОРИИ РАЗРЕШЕНИЙ\n"
+            stat_text += "─" * 60 + "\n"
+            for cat, count in sorted(perm_cats.items(), key=lambda x: -x[1]):
+                stat_text += f"  {cat:<35} {count:>5}\n"
+        
+        QMessageBox.information(self, "📊 Статистика Анализа", stat_text)
