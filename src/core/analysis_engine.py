@@ -7,11 +7,16 @@ import re
 import zipfile
 import platform
 from pathlib import Path
-from typing import Dict, List, Optional, Callable, Set, Tuple
+from typing import Dict, List, Optional, Callable
 from collections import defaultdict
 from datetime import datetime
 
-# Опционально: для точного детекта архитектуры из ELF-заголовка
+try:
+    import pyghidra
+    PYGHIDRA_AVAILABLE = True
+except ImportError:
+    PYGHIDRA_AVAILABLE = False
+
 try:
     from elftools.elf.elffile import ELFFile
     ELF_TOOLS_AVAILABLE = True
@@ -21,17 +26,10 @@ except ImportError:
 
 class AnalysisEngine:
     """
-    Ядро статического анализа APK файлов (Malware-Optimized Pipeline)
-    Production-Ready Architecture - Single Thread Ghidra
-    
-    Приоритеты:
-    🔴 Critical: DEX + Native (.so)
-    🟠 High: assets/ + strings.xml + network indicators
-    🟡 Medium: AndroidManifest.xml
-    🔵 Low: META-INF, metadata
+    Ядро статического анализа APK файлов (PyGhidra Edition)
+    Production-Ready Architecture - Python 3 Native
     """
     
-    # Системные библиотеки — НЕ анализировать
     SYSTEM_LIBS = {
         'libc++_shared.so', 'libc++.so', 'liblog.so', 'libm.so', 'libz.so',
         'libdl.so', 'libstdc++.so', 'libssl.so', 'libcrypto.so', 'libEGL.so',
@@ -39,10 +37,8 @@ class AnalysisEngine:
         'libandroid.so', 'libOpenSLES.so', 'libmediandk.so', 'libvulkan.so'
     }
     
-    # Директории для пропуска (не несут угроз)
     SKIP_DIRS = {'res/drawable', 'res/layout', 'res/font', 'res/anim', 'res/color', 'res/mipmap'}
     
-    # Сетевые индикаторы (regex)
     NETWORK_PATTERNS = {
         'url': re.compile(r'https?://[^\s"\'<>]+', re.I),
         'ip': re.compile(r'\b\d{1,3}(?:\.\d{1,3}){3}\b'),
@@ -50,22 +46,19 @@ class AnalysisEngine:
         'websocket': re.compile(r'wss?://[^\s"\'<>]+', re.I),
     }
     
-    # Индикаторы динамической загрузки
     DYNAMIC_LOAD_PATTERNS = [
         'DexClassLoader', 'PathClassLoader', 'URLClassLoader',
         'loadLibrary', 'System.load', 'System.loadLibrary',
         'Runtime.exec', 'ProcessBuilder'
     ]
     
-    def __init__(self, temp_dir: str = "temp", max_workers: int = 4):
+    def __init__(self, temp_dir: str = "temp"):
         self.temp_dir = Path(temp_dir)
         self.decompiled_dir = self.temp_dir / "decompiled"
         self.ghidra_scripts_dir = Path(__file__).parent / "ghidra_scripts"
         self.ghidra_input_dir = self.temp_dir / "ghidra_input"
         self.apk_path: Optional[Path] = None
-        self.max_workers = max_workers
         
-        # Результаты анализа
         self.manifest_data: str = ""
         self.manifest_info: Dict = {}
         self.permissions: List[Dict] = []
@@ -77,11 +70,9 @@ class AnalysisEngine:
         self.osint_data: Dict = {}
         self.signature_info: Dict = {}
         
-        # Статистика и оценка риска
         self.statistics: Dict = {}
         self.risk_score: int = 0
         
-        # Колбэки
         self.progress_callback: Optional[Callable] = None
         self.log_callback: Optional[Callable] = None
         self.use_ghidra: bool = True
@@ -95,6 +86,8 @@ class AnalysisEngine:
     def enable_ghidra(self, enabled: bool = True):
         self.use_ghidra = enabled
         self._log(f"🔧 Ghidra: {'включён' if enabled else 'отключён'}")
+        if enabled and not PYGHIDRA_AVAILABLE:
+            self._log("⚠ PyGhidra не установлен! Выполните: pip install pyghidra")
     
     def _log(self, message: str):
         if self.log_callback:
@@ -107,7 +100,6 @@ class AnalysisEngine:
     # ==================== ARCHITECTURE DETECTION ====================
     
     def _get_arch_from_path(self, path: Path) -> str:
-        """Определение архитектуры по пути (fallback)"""
         parts = path.as_posix().split("/")
         if len(parts) >= 2:
             parent = parts[-2]
@@ -116,14 +108,11 @@ class AnalysisEngine:
                 'armeabi-v7a': 'arm',
                 'x86_64': 'x86_64',
                 'x86': 'x86',
-                'mips': 'mips',
-                'mips64': 'mips64'
             }
             return arch_map.get(parent, parent)
         return "unknown"
     
     def _get_arch_from_elf(self, path: Path) -> str:
-        """Точное определение архитектуры из ELF-заголовка"""
         if not ELF_TOOLS_AVAILABLE:
             return self._get_arch_from_path(path)
         try:
@@ -135,15 +124,12 @@ class AnalysisEngine:
                     'EM_386': 'x86',
                     'EM_ARM': 'arm',
                     'EM_AARCH64': 'aarch64',
-                    'EM_MIPS': 'mips',
-                    'EM_MIPS_RS3_LE': 'mips'
                 }
                 return arch_map.get(machine, machine)
         except:
             return self._get_arch_from_path(path)
     
     def _get_arch(self, path: Path) -> str:
-        """Комбинированный детект архитектуры"""
         return self._get_arch_from_elf(path)
 
     # ==================== MAIN ANALYSIS PIPELINE ====================
@@ -152,42 +138,38 @@ class AnalysisEngine:
         try:
             self.apk_path = Path(apk_path)
             self._log("=" * 70)
-            self._log("🔍 LUCIDBYTE ANALYSIS ENGINE (Production-Ready)")
+            self._log("🔍 LUCIDBYTE ANALYSIS ENGINE (PyGhidra Edition)")
             self._log("=" * 70)
             self._log(f"📁 Файл: {apk_path}")
             self._log(f"📊 Размер: {os.path.getsize(apk_path) / 1024 / 1024:.2f} MB")
-            self._log(f"🔧 Ghidra Workers: 1 (single-thread)")
+            self._log(f"🔧 PyGhidra: {'доступен' if PYGHIDRA_AVAILABLE else 'НЕ доступен'}")
             self._log("=" * 70)
             
-            # Очистка
             if self.decompiled_dir.exists():
                 shutil.rmtree(self.decompiled_dir)
             self.decompiled_dir.mkdir(parents=True, exist_ok=True)
             self.ghidra_input_dir.mkdir(parents=True, exist_ok=True)
             
-            # === ЭТАП 1: Быстрый анализ ===
             self._progress(5, "Распаковка и быстрый анализ...")
             self._extract_apk_structure()
             
-            # === ЭТАП 2: Manifest + Permissions ===
             self._progress(15, "Анализ манифеста...")
             self._parse_manifest_fast()
             
-            # === ЭТАП 3: OSINT ресурсы ===
             self._progress(25, "Извлечение OSINT-индикаторов...")
             self._extract_osint_resources()
             self._extract_network_indicators()
             
-            # === ЭТАП 4: DEX анализ через jadx ===
             self._progress(40, "Анализ DEX (jadx)...")
             self._analyze_dex_fast()
             
-            # === ЭТАП 5: Native библиотеки (1 ПОТОК) ===
             if self.use_ghidra:
-                self._progress(70, "Анализ native библиотек (single-thread)...")
-                self._analyze_native_single_thread()
+                if not PYGHIDRA_AVAILABLE:
+                    self._log("⚠ PyGhidra не установлен, пропускаем native анализ")
+                else:
+                    self._progress(70, "Анализ native библиотек (PyGhidra)...")
+                    self._analyze_native_pyghidra()
             
-            # === ЭТАП 6: Сбор угроз и расчет риска ===
             self._progress(90, "Расчет риска и сбор результатов...")
             self._correlate_threats()
             self._calculate_risk_score()
@@ -464,8 +446,7 @@ class AnalysisEngine:
                 with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read(512*1024)
                 for net_type, pattern in self.NETWORK_PATTERNS.items():
-                    matches = pattern.findall(content)
-                    if matches:
+                    if matches := pattern.findall(content):
                         unique = list(set(matches))[:10]
                         self.network_indicators[net_type].extend(unique)
             except:
@@ -486,14 +467,16 @@ class AnalysisEngine:
         input_file = str(self.apk_path.absolute())
         self._log(f"📥 JADX вход: {input_file}")
         self._log(f"📤 JADX выход: {output_dir}")
+        
         is_windows = platform.system() == "Windows"
         is_batch = jadx_cmd.endswith(('.bat', '.cmd'))
+        
         if is_windows and is_batch:
             cmd = f'"{jadx_cmd}" -d "{output_dir}" -j 4 --no-replace-consts --show-bad-code --no-inline-methods "{input_file}"'
             env = os.environ.copy()
             env['JAVA_OPTS'] = '-Xmx4G'
             try:
-                process = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                subprocess.run(cmd, shell=True, capture_output=True, text=True,
                     timeout=900, encoding='utf-8', errors='ignore', env=env)
             except Exception as e:
                 self._log(f"✗ Ошибка jadx: {e}")
@@ -504,11 +487,12 @@ class AnalysisEngine:
             env = os.environ.copy()
             env['JAVA_OPTS'] = '-Xmx4G'
             try:
-                process = subprocess.run(cmd, capture_output=True, text=True,
+                subprocess.run(cmd, capture_output=True, text=True,
                     timeout=900, encoding='utf-8', errors='ignore', env=env)
             except Exception as e:
                 self._log(f"✗ Ошибка jadx: {e}")
                 return
+        
         java_files = list(self.decompiled_dir.rglob("*.java"))
         if java_files:
             self._log(f"✓ Создано Java файлов: {len(java_files):,}")
@@ -520,8 +504,7 @@ class AnalysisEngine:
         self._log("🔍 Поиск jadx...")
         jadx_names = ["jadx", "jadx.bat", "jadx.exe"]
         for name in jadx_names:
-            found = shutil.which(name)
-            if found:
+            if found := shutil.which(name):
                 self._log(f"✓ jadx найден в PATH: {found}")
                 return found
         jadx_paths = [r"C:\jadx\bin\jadx.bat", r"C:\jadx\bin\jadx.exe", r"C:\Program Files\jadx\bin\jadx.bat"]
@@ -544,6 +527,7 @@ class AnalysisEngine:
             {"pattern": "HttpURLConnection", "risk": "Medium", "desc": "HTTP соединение", "category": "Network"},
         ]
         self._log(f"🔍 Анализ угроз в {len(java_files):,} файлах...")
+        
         for file_path in java_files:
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -558,6 +542,7 @@ class AnalysisEngine:
                             })
             except:
                 continue
+        
         unique = []
         seen = set()
         for t in self.threats:
@@ -568,151 +553,55 @@ class AnalysisEngine:
         self.threats = unique
         self._log(f"✓ Найдено уникальных угроз: {len(self.threats):,}")
 
-    # ==================== NATIVE LIBS ANALYSIS (SINGLE THREAD) ====================
+    # ==================== NATIVE LIBS ANALYSIS (PYGHIDRA) ====================
     
-    def _analyze_native_single_thread(self):
-        """Однопоточный анализ .so с изолированными проектами (максимальная стабильность)"""
-        ghidra_home = self._find_ghidra()
-        if not ghidra_home:
+    def _analyze_native_pyghidra(self):
+        """Анализ .so через PyGhidra API (Python 3)"""
+        if not PYGHIDRA_AVAILABLE:
+            self._log("⚠ PyGhidra не установлен")
             return
+        
         so_files = list(self.decompiled_dir.rglob("*.so"))
         if not so_files:
             self._log("ℹ Native библиотеки не найдены")
             return
+        
         target_libs = [f for f in so_files if self._should_analyze_library(f.name)]
         if not target_libs:
             self._log("✓ Все .so библиотеки пропущены (системные)")
             return
+        
         self._log(f"📦 К анализу: {len(target_libs)} из {len(so_files)} библиотек")
         
-        # Подготовка окружения
-        projects_base_dir = self.temp_dir / "ghidra_native"
-        projects_base_dir.mkdir(parents=True, exist_ok=True)
-        script_dir = str(self.ghidra_scripts_dir.resolve())
-        self.ghidra_scripts_dir.mkdir(parents=True, exist_ok=True)
-        script_path = self.ghidra_scripts_dir / "ExportNativeIndicators.py"
-        if not script_path.exists():
-            self._create_native_ghidra_script(script_path)
-        props_path = self.ghidra_scripts_dir / "analysis.properties"
-        if not props_path.exists():
-            self._create_analysis_properties(props_path)
-        
-        is_windows = platform.system() == "Windows"
-        analyzer_cmd = os.path.join(ghidra_home, "support", "analyzeHeadless.bat" if is_windows else "analyzeHeadless")
-        
-        # ✅ ОДНОПОТОЧНОЕ ВЫПОЛНЕНИЕ (стабильность > скорость)
-        ghidra_workers = 1  # Жёсткое ограничение
-        
-        self._log(f"🔧 Ghidra workers: {ghidra_workers} (single-thread mode)")
+        # ✅ ДОБАВИТЬ: Путь к текущему скрипту в sys.path
+        import sys
+        script_dir = Path(__file__).parent.resolve()
+        if str(script_dir) not in sys.path:
+            sys.path.insert(0, str(script_dir))
+            self._log(f"🔧 Добавлен путь: {script_dir}")
         
         for idx, lib_path in enumerate(target_libs):
-            self._analyze_single_lib(
-                lib_path, idx, len(target_libs),
-                analyzer_cmd, projects_base_dir, script_dir, props_path
-            )
-    
-    def _analyze_single_lib(self, lib_path: Path, idx: int, total: int,
-                           analyzer_cmd: str, projects_base_dir: Path,
-                           script_dir: str, props_path: Path) -> bool:
-        """Анализ одной библиотеки"""
-        lib_name = lib_path.name
-        arch = self._get_arch(lib_path)
-        
-        # ✅ Уникальное имя проекта: Native_{lib}_{arch}
-        project_name = f"Native_{lib_name}_{arch}"
-        project_dir = projects_base_dir / project_name
-        project_dir.mkdir(parents=True, exist_ok=True)
-        
-        # ✅ Уникальная копия файла для импорта (избегаем кэша Ghidra)
-        unique_name = f"{lib_path.stem}_{arch}.so"
-        unique_path = self.ghidra_input_dir / unique_name
-        unique_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(lib_path, unique_path)
-        
-        output_json = str((self.decompiled_dir / f"ghidra_{lib_name}.json").resolve())
-        log_file = str((self.temp_dir / f"ghidra_{lib_name}.log").resolve())
-        
-        # ✅ Production-ready команда (исправленные аргументы)
-        cmd = [
-            analyzer_cmd,
-            str(projects_base_dir.resolve()),
-            project_name,
-            "-import", str(unique_path.resolve()),
-            "-overwrite",                    # ✅ Разрешает перезапись
-            "-analysisTimeoutPerFile", "60", # ✅ Минимальный анализ функций
-            "-scriptPath", script_dir,
-            "-postScript", "ExportNativeIndicators.py", output_json,
-            "-log", log_file
-            # ❌ Удалены: -propertiesFile, -quiet, -noanalysis
-        ]
-        
-        self._log(f"[{idx+1}/{total}] 🔄 Анализ: {lib_name} (arch: {arch})")
-        self._progress(50 + idx * 40 // total, f"Native: {lib_name}")
-        
-        try:
-            env = os.environ.copy()
-            env["GHIDRA_PROJECT_DIR"] = str(projects_base_dir.resolve())
-            env["_JAVA_OPTIONS"] = "-Xmx2G"
+            lib_name = lib_path.name
+            arch = self._get_arch(lib_path)
+            output_json = str((self.decompiled_dir / f"ghidra_{lib_name}.json").resolve())
             
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                env=env,
-                encoding="utf-8",
-                errors="ignore"
-            )
+            self._log(f"[{idx+1}/{len(target_libs)}] 🔄 Анализ: {lib_name} (arch: {arch})")
+            self._progress(50 + idx * 40 // len(target_libs), f"Native: {lib_name}")
             
-            # Чтение stdout
-            for line in process.stdout:
-                line = line.strip()
-                if self.log_callback and any(kw in line for kw in ["ERROR", "WARN"]):
-                    self._log(f"  [Ghidra:{lib_name}] {line}")
-                if "Importing" in line:
-                    self._progress(52 + idx * 40 // total, f"Импорт: {lib_name}")
-                elif "Script" in line or "Export" in line:
-                    self._progress(55 + idx * 40 // total, f"Экспорт: {lib_name}")
-            
-            # ✅ Фильтрация шума _JAVA_OPTIONS из stderr
-            stderr_output = []
-            for line in process.stderr:
-                line = line.strip()
-                if "Picked up _JAVA_OPTIONS" in line:
-                    continue  # Игнорируем шум
-                stderr_output.append(line)
-                if self.log_callback:
-                    self._log(f"  [Ghidra:STDERR:{lib_name}] {line}")
-            
-            process.wait(timeout=300)
-            
-            if process.returncode == 0 and os.path.exists(output_json):
-                self._parse_native_json(output_json, lib_name)
-                # Очистка временных файлов
-                if unique_path.exists():
-                    unique_path.unlink()
-                self._log(f"✓ Завершено: {lib_name} ({os.path.getsize(output_json)/1024:.1f} KB)")
-                return True
-            else:
-                error_info = stderr_output[-10:] if stderr_output else "нет деталей"
-                self._log(f"⚠ Ошибка {lib_name}: код {process.returncode}, детали: {error_info}")
-                return False
+            try:
+                # ✅ Импортируем анализатор PyGhidra
+                from native_analyzer import analyze_native_library
                 
-        except subprocess.TimeoutExpired:
-            self._log(f"✗ Таймаут: {lib_name} (>5 мин), принудительное завершение")
-            process.kill()
-            process.communicate()
-            return False
-        except Exception as e:
-            self._log(f"✗ Ошибка {lib_name}: {e}")
-            if 'process' in locals():
-                try:
-                    process.kill()
-                    process.communicate()
-                except:
-                    pass
-            return False
+                # Запуск анализа через PyGhidra API
+                results = analyze_native_library(str(lib_path.resolve()), output_json)
+                
+                self._parse_native_json(output_json, lib_name)
+                self._log(f"✓ Завершено: {lib_name} ({os.path.getsize(output_json)/1024:.1f} KB)")
+                
+            except Exception as e:
+                self._log(f"✗ Ошибка {lib_name}: {e}")
+                import traceback
+                self._log(f"📋 Traceback:\n{traceback.format_exc()}")
     
     def _should_analyze_library(self, lib_name: str) -> bool:
         if lib_name in self.SYSTEM_LIBS:
@@ -721,208 +610,11 @@ class AnalysisEngine:
         self._log(f"✓ Кастомная библиотека: {lib_name}")
         return True
     
-    def _find_ghidra(self) -> Optional[str]:
-        self._log("🔍 Поиск Ghidra...")
-        possible_paths = [
-            os.environ.get("GHIDRA_HOME"),
-            r"C:\ghidra_12.0.4_PUBLIC", r"C:\ghidra_12.0_PUBLIC",
-            r"C:\ghidra_11.2_PUBLIC",
-        ]
-        for path in possible_paths:
-            if path and os.path.exists(path):
-                analyzer = Path(path) / "support" / ("analyzeHeadless.bat" if platform.system() == "Windows" else "analyzeHeadless")
-                if analyzer.exists():
-                    self._log(f"✓ Ghidra найден: {path}")
-                    return str(Path(path).resolve())
-        self._log("✗ Ghidra не найден")
-        return None
-    
-    def _create_native_ghidra_script(self, script_path: Path):
-        """Jython-совместимый скрипт для извлечения индикаторов"""
-        script_content = '''# @author LucidByte
-# @category MalwareAnalysis
-# @keybinding
-# @menupath
-
-import os
-import json
-import re
-from ghidra.app.script import GhidraScript
-from ghidra.program.model.listing import Function, Listing
-from ghidra.program.model.symbol import SourceType, SymbolTable
-
-class ExportNativeIndicators(GhidraScript):
-    
-    def run(self):
-        if len(getScriptArgs()) < 1:
-            print("Usage: ExportNativeIndicators.py <output_json>")
-            return
-        
-        output_path = getScriptArgs()[0]
-        results = {
-            "functions": [],
-            "imports": [],
-            "exports": [],
-            "strings": [],
-            "jni_functions": [],
-            "suspicious_names": []
-        }
-        
-        # === 1. Сбор функций (работает с минимальным анализом) ===
-        listing = currentProgram.getListing()
-        func_iter = listing.getFunctions(True)
-        while func_iter.hasNext():
-            func = func_iter.next()
-            fname = func.getName()
-            fentry = str(func.getEntryPoint())
-            
-            if fname.startswith("Java_") or fname.startswith("JNI_"):
-                results["jni_functions"].append({
-                    "name": fname,
-                    "address": fentry,
-                    "signature": str(func.getSignature())
-                })
-            
-            suspicious = ["crypto", "encrypt", "decrypt", "key", "secret", 
-                         "inject", "hook", "root", "su", "priv", "hide"]
-            for kw in suspicious:
-                if kw in fname.lower():
-                    results["suspicious_names"].append({
-                        "function": fname,
-                        "address": fentry,
-                        "keyword": kw,
-                        "risk": "High"
-                    })
-                    break
-            
-            results["functions"].append({"name": fname, "address": fentry})
-        
-        # === 2. Сбор импортов ===
-        symbol_table = currentProgram.getSymbolTable()
-        sym_iter = symbol_table.getSymbolIterator()
-        while sym_iter.hasNext():
-            sym = sym_iter.next()
-            if sym.isExternalEntryPoint():
-                sym_name = sym.getName()
-                results["imports"].append({
-                    "name": sym_name,
-                    "address": str(sym.getAddress()),
-                    "risk": self._assess_import_risk(sym_name)
-                })
-        
-        # === 3. Сбор экспортов ===
-        sym_iter2 = symbol_table.getSymbolIterator()
-        while sym_iter2.hasNext():
-            sym = sym_iter2.next()
-            if sym.getSource() == SourceType.USER_DEFINED and sym.isGlobal():
-                sname = sym.getName()
-                if sname.startswith("Java_") or sname.startswith("JNI_"):
-                    results["exports"].append({
-                        "name": sname,
-                        "address": str(sym.getAddress())
-                    })
-        
-        # === 4. Строки из памяти ===
-        try:
-            mem = currentProgram.getMemory()
-            blocks = mem.getBlocks()
-            while blocks.hasNext():
-                block = blocks.next()
-                if block.isInitialized() and block.isRead():
-                    try:
-                        size = min(2*1024*1024, int(block.getSize()))
-                        data = block.getBytes(block.getStart(), size)
-                        strings = re.findall(b'[\\x20-\\x7E]{8,}', data)
-                        count = 0
-                        for s in strings:
-                            if count >= 50:
-                                break
-                            try:
-                                decoded = s.decode('ascii')
-                                keywords = ['http', 'https', '.so', '.apk', '192.168', '10.', '172.', 'api', 'token', 'key']
-                                found = False
-                                for kw in keywords:
-                                    if kw in decoded.lower():
-                                        found = True
-                                        break
-                                if found:
-                                    results["strings"].append(decoded[:150])
-                                    count += 1
-                            except:
-                                pass
-                    except:
-                        pass
-        except:
-            pass
-        
-        # === 5. Сохранение ===
-        f = open(output_path, "w")
-        try:
-            f.write(json.dumps(results, indent=2, ensure_ascii=False))
-        finally:
-            f.close()
-        
-        print("✓ Export: {} funcs, {} imports, {} JNI".format(
-            len(results['functions']),
-            len(results['imports']),
-            len(results['jni_functions'])
-        ))
-    
-    def _assess_import_risk(self, import_name):
-        critical = ["exec", "system", "popen", "dlopen", "dlsym", "mmap", 
-                    "ptrace", "getuid", "setuid", "chmod", "chown", "kill", "fork"]
-        high = ["socket", "connect", "send", "recv", "open", "read", "write", 
-                "close", "ioctl", "fcntl", "getenv", "putenv"]
-        name_lower = import_name.lower()
-        for kw in critical:
-            if kw in name_lower:
-                return "Critical"
-        for kw in high:
-            if kw in name_lower:
-                return "High"
-        return "Low"
-'''
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(script_content)
-        self._log(f"📝 Скрипт создан: {script_path}")
-    
-    def _create_analysis_properties(self, props_path: Path):
-        """Минимальные настройки анализаторов для скорости"""
-        content = """# Ghidra Analysis Properties - Malware Optimized
-# Включены только необходимые анализаторы для извлечения индикаторов
-
-# === ВКЛЮЧЕНО (минимально необходимые) ===
-Create Functions=true
-Function ID Analyzer=true
-ELF Scalar Operand References=true
-String Reference Analyzer=true
-Symbol Analyzer=true
-ELF Program Header Analyzer=true
-ELF Section Header Analyzer=true
-External Symbol Analyzer=true
-
-# === ОТКЛЮЧЕНО (тяжёлые, не нужны для индикаторов) ===
-Decompiler Switch Analyzer=false
-Stack Analyzer=false
-Data Reference Analyzer=false
-Constant Reference Analyzer=false
-Demangler GNU=false
-Call Graph Analyzer=false
-Version Tracking Analyzer=false
-Create Address Tables=false
-Apply Data Archives=false
-
-# === НАСТРОЙКИ ===
-analysis.timeout.per.file=60
-"""
-        with open(props_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        self._log(f"📝 Создан analysis.properties: {props_path}")
-    
     def _parse_native_json(self, json_path: str, lib_name: str):
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            
             for imp in data.get("imports", []):
                 if imp.get("risk") in ["Critical", "High"]:
                     self.threats.append({
@@ -932,6 +624,7 @@ analysis.timeout.per.file=60
                         "desc": f"Опасный native импорт: {imp['name']}",
                         "category": "Native_Import"
                     })
+            
             for jni in data.get("jni_functions", []):
                 self.threats.append({
                     "file": f"native:{lib_name}",
@@ -940,6 +633,7 @@ analysis.timeout.per.file=60
                     "desc": f"JNI entry point: {jni['name']}",
                     "category": "Native_JNI"
                 })
+            
             for susp in data.get("suspicious_names", []):
                 self.threats.append({
                     "file": f"native:{lib_name}",
@@ -948,8 +642,10 @@ analysis.timeout.per.file=60
                     "desc": f"Подозрительная функция: {susp['function']}",
                     "category": "Native_Suspicious"
                 })
+            
             self.native_data[lib_name] = data
             self._log(f"✓ {lib_name}: {len(data.get('imports', []))} imports, {len(data.get('jni_functions', []))} JNI")
+            
         except Exception as e:
             self._log(f"⚠ Ошибка парсинга {json_path}: {e}")
 
@@ -1003,6 +699,7 @@ analysis.timeout.per.file=60
         risk_counts = defaultdict(int)
         for t in self.threats:
             risk_counts[t["risk"]] += 1
+        
         self._log(f"📊 Файлов Java: {len(list(self.decompiled_dir.rglob('*.java'))):,}")
         self._log(f"📦 Native .so: {len(list(self.decompiled_dir.rglob('*.so')))}")
         self._log(f"⚠ Угроз всего: {len(self.threats):,}")
@@ -1013,51 +710,6 @@ analysis.timeout.per.file=60
         self._log(f"🔐 Разрешений: {len(self.permissions)}")
         self._log(f"🌐 URL индикаторов: {len(self.network_indicators.get('url', []))}")
         self._log(f"📦 Пакет: {self.manifest_info.get('package', 'N/A')}")
-
-    # ==================== STATISTICS ====================
-    
-    def _collect_statistics(self):
-        java_files = list(self.decompiled_dir.rglob("*.java"))
-        xml_files = list(self.decompiled_dir.rglob("*.xml"))
-        dex_files = list(self.decompiled_dir.rglob("*.dex"))
-        so_files = list(self.decompiled_dir.rglob("*.so"))
-        risk_counts = defaultdict(int)
-        category_counts = defaultdict(int)
-        permission_risks = defaultdict(int)
-        for t in self.threats:
-            risk_counts[t["risk"]] += 1
-            category_counts[t["category"]] += 1
-        for p in self.permissions:
-            permission_risks[p["risk"]] += 1
-        self.statistics = {
-            "total_java_files": len(java_files),
-            "total_xml_files": len(xml_files),
-            "total_dex_files": len(dex_files),
-            "total_so_files": len(so_files),
-            "total_files": len(list(self.decompiled_dir.rglob("*"))),
-            "total_threats": len(self.threats),
-            "critical_threats": risk_counts.get("Critical", 0),
-            "high_threats": risk_counts.get("High", 0),
-            "medium_threats": risk_counts.get("Medium", 0),
-            "low_threats": risk_counts.get("Low", 0),
-            "total_permissions": len(self.permissions),
-            "dangerous_permissions": permission_risks.get("Critical", 0) + permission_risks.get("High", 0),
-            "total_strings": len(self.strings_data),
-            "threat_categories": dict(category_counts),
-            "permission_categories": {},
-            "network_indicators": {k: len(v) for k, v in self.network_indicators.items()},
-            "native_libs_analyzed": len(self.native_data),
-            "apk_size_mb": os.path.getsize(self.apk_path) / 1024 / 1024 if self.apk_path else 0,
-            "risk_score": self.risk_score,
-        }
-        perm_cats = defaultdict(int)
-        for p in self.permissions:
-            perm_cats[p["category"]] += 1
-        self.statistics["permission_categories"] = dict(perm_cats)
-        self.statistics["package_name"] = self.manifest_info.get("package", "N/A")
-        self.statistics["version_name"] = self.manifest_info.get("version", "N/A")
-        self.statistics["min_sdk"] = self.manifest_info.get("min_sdk", "N/A")
-        self.statistics["target_sdk"] = self.manifest_info.get("target_sdk", "N/A")
 
     # ==================== PUBLIC ACCESSORS ====================
     

@@ -16,3 +16,4 @@ mitmproxy
 pycryptodome
 pefile
 lief
+pyghidra

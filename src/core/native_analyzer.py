@@ -6,15 +6,18 @@ Native Library Analyzer for PyGhidra
 import json
 import re
 from typing import Dict, List, Any
-from ghidra.app.model import ProgramModel
-from ghidra.program.model.listing import Program
-from ghidra.program.model.symbol import SourceType
+
+try:
+    import pyghidra
+    PYGHIDRA_AVAILABLE = True
+except ImportError:
+    PYGHIDRA_AVAILABLE = False
 
 
 class NativeIndicatorExtractor:
     """Извлечение индикаторов угроз из native библиотек через PyGhidra"""
     
-    def __init__(self, program: Program):
+    def __init__(self, program):
         self.program = program
         self.results = {
             "functions": [],
@@ -77,6 +80,7 @@ class NativeIndicatorExtractor:
     
     def _extract_exports(self):
         """Сбор экспортов (JNI entry points)"""
+        from ghidra.program.model.symbol import SourceType
         symbol_table = self.program.getSymbolTable()
         for symbol in symbol_table.getAllSymbols(True):
             if symbol.getSource() == SourceType.USER_DEFINED and symbol.isGlobal():
@@ -139,7 +143,8 @@ def analyze_native_library(lib_path: str, output_json: str) -> Dict[str, Any]:
     Returns:
         Dict с результатами анализа
     """
-    import pyghidra
+    if not PYGHIDRA_AVAILABLE:
+        raise ImportError("PyGhidra не установлен. Выполните: pip install pyghidra")
     
     print(f"🔍 Анализ: {lib_path}")
     
