@@ -6,6 +6,7 @@ import json
 import re
 import os
 from typing import Dict, List, Any
+from datetime import datetime
 
 try:
     import pyghidra
@@ -28,7 +29,7 @@ class NativeIndicatorExtractor:
             "jni_functions": [],
             "suspicious_names": []
         }
-        
+    
     def extract_all(self) -> Dict[str, Any]:
         """Извлечь все индикаторы"""
         self._extract_functions()
@@ -136,16 +137,18 @@ class NativeIndicatorExtractor:
 def analyze_native_library(lib_path: str, output_json: str, jvm_already_started: bool = False) -> Dict[str, Any]:
     """
     Анализ одной native библиотеки через PyGhidra
+    
     Args:
         lib_path: Путь к .so файлу
         output_json: Путь для сохранения результатов
         jvm_already_started: Флаг указывающий, что Виртуальная Машина Java уже запущена
+    
     Returns:
         Dict с результатами анализа
     """
     if not PYGHIDRA_AVAILABLE:
         raise ImportError("PyGhidra не установлен. Выполните: pip install pyghidra")
-
+    
     print(f"🔍 Анализ: {lib_path}")
 
     try:
@@ -162,7 +165,14 @@ def analyze_native_library(lib_path: str, output_json: str, jvm_already_started:
             extractor = NativeIndicatorExtractor(program)
             results = extractor.extract_all()
             
-            # Сохранение результатов 
+            # Добавляем метаданные
+            results["metadata"] = {
+                "library_name": os.path.basename(lib_path),
+                "library_path": lib_path,
+                "analysis_time": datetime.now().isoformat(),
+            }
+            
+            # Сохранение результатов
             with open(output_json, "w", encoding="utf-8") as f:
                 json.dump(results, f, indent=2, ensure_ascii=False)
             
@@ -171,6 +181,7 @@ def analyze_native_library(lib_path: str, output_json: str, jvm_already_started:
                   f"{len(results['jni_functions'])} JNI")
             
             return results
+            
     except RuntimeError as e:
         if "Unable to start JVM" in str(e):
             print("✗ Ошибка: Не удалось запустить Виртуальную Машину Java.")
