@@ -3,12 +3,15 @@
 # @keybinding
 # @menupath
 
-import os, json
+import os
+import json
+import re
 from ghidra.app.script import GhidraScript
 from ghidra.program.model.listing import Function, Listing
 from ghidra.program.model.symbol import SourceType, SymbolTable
 
 class ExportNativeIndicators(GhidraScript):
+    
     def run(self):
         if len(getScriptArgs()) < 1:
             print("Usage: ExportNativeIndicators.py <output_json>")
@@ -26,7 +29,9 @@ class ExportNativeIndicators(GhidraScript):
         
         # === 1. Сбор функций (работает даже без анализа) ===
         listing = currentProgram.getListing()
-        for func in listing.getFunctions(True):
+        func_iter = listing.getFunctions(True)
+        while func_iter.hasNext():
+            func = func_iter.next()
             fname = func.getName()
             fentry = str(func.getEntryPoint())
             
@@ -55,7 +60,9 @@ class ExportNativeIndicators(GhidraScript):
         
         # === 2. Сбор импортов (внешние символы) — работает без анализа ===
         symbol_table = currentProgram.getSymbolTable()
-        for sym in symbol_table.getSymbolIterator():
+        sym_iter = symbol_table.getSymbolIterator()
+        while sym_iter.hasNext():
+            sym = sym_iter.next()
             if sym.isExternalEntryPoint():
                 sym_name = sym.getName()
                 results["imports"].append({
@@ -65,7 +72,9 @@ class ExportNativeIndicators(GhidraScript):
                 })
         
         # === 3. Сбор экспортов (JNI entry points) ===
-        for sym in symbol_table.getSymbolIterator():
+        sym_iter2 = symbol_table.getSymbolIterator()
+        while sym_iter2.hasNext():
+            sym = sym_iter2.next()
             if sym.getSource() == SourceType.USER_DEFINED and sym.isGlobal():
                 sname = sym.getName()
                 if sname.startswith("Java_") or sname.startswith("JNI_"):
@@ -77,21 +86,31 @@ class ExportNativeIndicators(GhidraScript):
         # === 4. Строки из памяти (работает без анализа) ===
         try:
             mem = currentProgram.getMemory()
-            for block in mem.getBlocks():
+            blocks = mem.getBlocks()
+            while blocks.hasNext():
+                block = blocks.next()
                 if block.isInitialized() and block.isRead():
                     try:
                         size = min(2*1024*1024, int(block.getSize()))
                         data = block.getBytes(block.getStart(), size)
                         # ASCII строки 8+ символов
-                        import re
                         strings = re.findall(b'[\x20-\x7E]{8,}', data)
-                        for s in strings[:50]:  # Лимит на блок
+                        count = 0
+                        for s in strings:
+                            if count >= 50:
+                                break
                             try:
                                 decoded = s.decode('ascii')
                                 # Фильтр: только сетевые/подозрительные
-                                if any(kw in decoded.lower() for kw in 
-                                       ['http', 'https', '.so', '.apk', '192.168', '10.', '172.', 'api', 'token', 'key']):
+                                keywords = ['http', 'https', '.so', '.apk', '192.168', '10.', '172.', 'api', 'token', 'key']
+                                found = False
+                                for kw in keywords:
+                                    if kw in decoded.lower():
+                                        found = True
+                                        break
+                                if found:
                                     results["strings"].append(decoded[:150])
+                                    count += 1
                             except:
                                 pass
                     except:
@@ -100,14 +119,20 @@ class ExportNativeIndicators(GhidraScript):
             pass
         
         # === 5. Сохранение ===
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
+        f = open(output_path, "w")
+        try:
+            f.write(json.dumps(results, indent=2, ensure_ascii=False))
+        finally:
+            f.close()
         
-        print(f"✓ Export: {len(results['functions'])} funcs, "
-              f"{len(results['imports'])} imports, "
-              f"{len(results['jni_functions'])} JNI")
+        # Вывод статистики (Jython-совместимый)
+        print("✓ Export: {} funcs, {} imports, {} JNI".format(
+            len(results['functions']),
+            len(results['imports']),
+            len(results['jni_functions'])
+        ))
     
-    def _assess_import_risk(self, import_name: str) -> str:
+    def _assess_import_risk(self, import_name):
         """Оценка риска импортируемой функции"""
         critical = ["exec", "system", "popen", "dlopen", "dlsym", "mmap", 
                     "ptrace", "getuid", "setuid", "chmod", "chown", "kill", "fork"]
