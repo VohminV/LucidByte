@@ -1,14 +1,15 @@
 """
-Native Library Analyzer for PyGhidra
+Анализатор Native Библиотек для PyGhidra
 Анализ .so библиотек через PyGhidra API (Python 3)
 """
-
 import json
 import re
+import os
 from typing import Dict, List, Any
 
 try:
     import pyghidra
+    import jpype
     PYGHIDRA_AVAILABLE = True
 except ImportError:
     PYGHIDRA_AVAILABLE = False
@@ -27,7 +28,7 @@ class NativeIndicatorExtractor:
             "jni_functions": [],
             "suspicious_names": []
         }
-    
+        
     def extract_all(self) -> Dict[str, Any]:
         """Извлечь все индикаторы"""
         self._extract_functions()
@@ -35,7 +36,7 @@ class NativeIndicatorExtractor:
         self._extract_exports()
         self._extract_strings()
         return self.results
-    
+
     def _extract_functions(self):
         """Сбор функций"""
         func_manager = self.program.getFunctionManager()
@@ -53,7 +54,7 @@ class NativeIndicatorExtractor:
             
             # Подозрительные имена
             suspicious = ["crypto", "encrypt", "decrypt", "key", "secret", 
-                         "inject", "hook", "root", "su", "priv", "hide"]
+                          "inject", "hook", "root", "su", "priv", "hide"]
             for kw in suspicious:
                 if kw in fname.lower():
                     self.results["suspicious_names"].append({
@@ -65,7 +66,7 @@ class NativeIndicatorExtractor:
                     break
             
             self.results["functions"].append({"name": fname, "address": fentry})
-    
+
     def _extract_imports(self):
         """Сбор импортов (внешние символы)"""
         symbol_table = self.program.getSymbolTable()
@@ -77,7 +78,7 @@ class NativeIndicatorExtractor:
                     "address": str(symbol.getAddress()),
                     "risk": self._assess_import_risk(sym_name)
                 })
-    
+
     def _extract_exports(self):
         """Сбор экспортов (JNI entry points)"""
         from ghidra.program.model.symbol import SourceType
@@ -90,7 +91,7 @@ class NativeIndicatorExtractor:
                         "name": sname,
                         "address": str(symbol.getAddress())
                     })
-    
+
     def _extract_strings(self):
         """Извлечение строк из памяти"""
         mem = self.program.getMemory()
@@ -114,7 +115,7 @@ class NativeIndicatorExtractor:
                             pass
                 except:
                     pass
-    
+
     def _assess_import_risk(self, import_name: str) -> str:
         """Оценка риска импортируемой функции"""
         critical = ["exec", "system", "popen", "dlopen", "dlsym", "mmap", 
@@ -132,41 +133,56 @@ class NativeIndicatorExtractor:
         return "Low"
 
 
-def analyze_native_library(lib_path: str, output_json: str) -> Dict[str, Any]:
+def analyze_native_library(lib_path: str, output_json: str, jvm_already_started: bool = False) -> Dict[str, Any]:
     """
     Анализ одной native библиотеки через PyGhidra
-    
     Args:
         lib_path: Путь к .so файлу
         output_json: Путь для сохранения результатов
-    
+        jvm_already_started: Флаг указывающий, что Виртуальная Машина Java уже запущена
     Returns:
         Dict с результатами анализа
     """
     if not PYGHIDRA_AVAILABLE:
         raise ImportError("PyGhidra не установлен. Выполните: pip install pyghidra")
-    
+
     print(f"🔍 Анализ: {lib_path}")
-    
-    # Открытие программы через PyGhidra
-    with pyghidra.open_program(lib_path, analyze=False) as program:
-        # Запуск анализа
-        print("  ▶ Запуск анализа...")
-        program.analyze()
-        
-        # Извлечение индикаторов
-        extractor = NativeIndicatorExtractor(program)
-        results = extractor.extract_all()
-        
-        # Сохранение результатов
-        with open(output_json, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-        
-        print(f"✓ Export: {len(results['functions'])} funcs, "
-              f"{len(results['imports'])} imports, "
-              f"{len(results['jni_functions'])} JNI")
-        
-        return results
+
+    # Проверка состояния Виртуальной Машины Java
+    if not jvm_already_started:
+        if jpype.isJVMStarted():
+            print("⚠ Виртуальная Машина Java уже запущена. Используем существующую.")
+            jvm_already_started = True
+        else:
+            # Проверка JAVA_HOME
+            if not os.environ.get('JAVA_HOME'):
+                print("⚠ Переменная окружения JAVA_HOME не установлена.")
+
+    try:
+        # Открытие программы через PyGhidra
+        # Если Виртуальная Машина Java уже запущена, pyghidra.open_program должен использовать её
+        with pyghidra.open_program(lib_path, analyze=False) as program:
+            # Запуск анализа
+            print("  ▶ Запуск анализа...")
+            program.analyze()
+            
+            # Извлечение индикаторов
+            extractor = NativeIndicatorExtractor(program)
+            results = extractor.extract_all()
+            
+            # Сохранение результатов 
+            with open(output_json, "w", encoding="utf-8") as f:
+                json.dump(results, f, indent=2, ensure_ascii=False)
+            
+            print(f"✓ Export: {len(results['functions'])} функций, "
+                  f"{len(results['imports'])} импортов, "
+                  f"{len(results['jni_functions'])} JNI")
+            
+            return results
+    except RuntimeError as e:
+        if "Unable to start JVM" in str(e):
+            print("✗ Ошибка: Не удалось запустить Виртуальную Машину Java. Убедитесь, что она не запущена дважды.")
+        raise e
 
 
 if __name__ == "__main__":
@@ -174,5 +190,4 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage: python native_analyzer.py <lib_path> <output_json>")
         sys.exit(1)
-    
     analyze_native_library(sys.argv[1], sys.argv[2])

@@ -13,6 +13,8 @@ from datetime import datetime
 
 try:
     import pyghidra
+    import jpype
+    from pyghidra.launcher import HeadlessPyGhidraLauncher
     PYGHIDRA_AVAILABLE = True
 except ImportError:
     PYGHIDRA_AVAILABLE = False
@@ -26,32 +28,30 @@ except ImportError:
 
 class AnalysisEngine:
     """
-    Ядро статического анализа APK файлов (PyGhidra Edition)
-    Production-Ready Architecture - Python 3 Native
+    Ядро статического анализа файлов APK (Издание PyGhidra)
+    Архитектура Готовая к Производству - Python 3 Native
     """
-    
     SYSTEM_LIBS = {
         'libc++_shared.so', 'libc++.so', 'liblog.so', 'libm.so', 'libz.so',
         'libdl.so', 'libstdc++.so', 'libssl.so', 'libcrypto.so', 'libEGL.so',
         'libGLESv1_CM.so', 'libGLESv2.so', 'libGLESv3.so', 'libjnigraphics.so',
         'libandroid.so', 'libOpenSLES.so', 'libmediandk.so', 'libvulkan.so'
     }
-    
     SKIP_DIRS = {'res/drawable', 'res/layout', 'res/font', 'res/anim', 'res/color', 'res/mipmap'}
-    
+
     NETWORK_PATTERNS = {
         'url': re.compile(r'https?://[^\s"\'<>]+', re.I),
         'ip': re.compile(r'\b\d{1,3}(?:\.\d{1,3}){3}\b'),
         'domain': re.compile(r'[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?'),
         'websocket': re.compile(r'wss?://[^\s"\'<>]+', re.I),
     }
-    
+
     DYNAMIC_LOAD_PATTERNS = [
         'DexClassLoader', 'PathClassLoader', 'URLClassLoader',
         'loadLibrary', 'System.load', 'System.loadLibrary',
         'Runtime.exec', 'ProcessBuilder'
     ]
-    
+
     def __init__(self, temp_dir: str = "temp"):
         self.temp_dir = Path(temp_dir)
         self.decompiled_dir = self.temp_dir / "decompiled"
@@ -69,13 +69,14 @@ class AnalysisEngine:
         self.threats: List[Dict] = []
         self.osint_data: Dict = {}
         self.signature_info: Dict = {}
-        
+          
         self.statistics: Dict = {}
         self.risk_score: int = 0
         
         self.progress_callback: Optional[Callable] = None
         self.log_callback: Optional[Callable] = None
         self.use_ghidra: bool = True
+        self.ghidra_initialized: bool = False
         
     def set_progress_callback(self, callback: Callable[[int, str], None]):
         self.progress_callback = callback
@@ -88,7 +89,7 @@ class AnalysisEngine:
         self._log(f"🔧 Ghidra: {'включён' if enabled else 'отключён'}")
         if enabled and not PYGHIDRA_AVAILABLE:
             self._log("⚠ PyGhidra не установлен! Выполните: pip install pyghidra")
-    
+
     def _log(self, message: str):
         if self.log_callback:
             self.log_callback(message)
@@ -98,7 +99,7 @@ class AnalysisEngine:
             self.progress_callback(value, message)
 
     # ==================== ARCHITECTURE DETECTION ====================
-    
+
     def _get_arch_from_path(self, path: Path) -> str:
         parts = path.as_posix().split("/")
         if len(parts) >= 2:
@@ -111,7 +112,7 @@ class AnalysisEngine:
             }
             return arch_map.get(parent, parent)
         return "unknown"
-    
+
     def _get_arch_from_elf(self, path: Path) -> str:
         if not ELF_TOOLS_AVAILABLE:
             return self._get_arch_from_path(path)
@@ -128,20 +129,20 @@ class AnalysisEngine:
                 return arch_map.get(machine, machine)
         except:
             return self._get_arch_from_path(path)
-    
+
     def _get_arch(self, path: Path) -> str:
         return self._get_arch_from_elf(path)
 
     # ==================== MAIN ANALYSIS PIPELINE ====================
-    
+
     def analyze_apk(self, apk_path: str) -> bool:
         try:
             self.apk_path = Path(apk_path)
             self._log("=" * 70)
-            self._log("🔍 LUCIDBYTE ANALYSIS ENGINE (PyGhidra Edition)")
+            self._log("🔍 LUCIDBYTE ANALYSIS ENGINE (Издание PyGhidra)")
             self._log("=" * 70)
             self._log(f"📁 Файл: {apk_path}")
-            self._log(f"📊 Размер: {os.path.getsize(apk_path) / 1024 / 1024:.2f} MB")
+            self._log(f"📊 Размер: {os.path.getsize(apk_path) / 1024 / 1024:.2f} Мегабайт")
             self._log(f"🔧 PyGhidra: {'доступен' if PYGHIDRA_AVAILABLE else 'НЕ доступен'}")
             self._log("=" * 70)
             
@@ -165,7 +166,7 @@ class AnalysisEngine:
             
             if self.use_ghidra:
                 if not PYGHIDRA_AVAILABLE:
-                    self._log("⚠ PyGhidra не установлен, пропускаем native анализ")
+                    self._log("⚠ PyGhidra не установлен, пропускаем анализ native библиотек")
                 else:
                     self._progress(70, "Анализ native библиотек (PyGhidra)...")
                     self._analyze_native_pyghidra()
@@ -176,7 +177,7 @@ class AnalysisEngine:
             
             self._progress(100, "Анализ завершен")
             self._log("=" * 70)
-            self._log(f"✓ АНАЛИЗ ЗАВЕРШЕН | 🎯 Risk Score: {self.risk_score}/100")
+            self._log(f"✓ АНАЛИЗ ЗАВЕРШЕН | 🎯 Оценка Риска: {self.risk_score}/100")
             self._log("=" * 70)
             self._print_summary()
             return True
@@ -184,11 +185,11 @@ class AnalysisEngine:
         except Exception as e:
             import traceback
             self._log(f"✗ Ошибка анализа: {str(e)}")
-            self._log(f"📋 Traceback:\n{traceback.format_exc()}")
+            self._log(f"📋 Трассировка:\n{traceback.format_exc()}")
             return False
 
     # ==================== APK EXTRACTION ====================
-    
+
     def _extract_apk_structure(self):
         self._log("📦 Распаковка APK...")
         
@@ -208,7 +209,7 @@ class AnalysisEngine:
             self._log(f"  • Native .so: {stats['so_files']}")
         if stats['dex_files']:
             self._log(f"  • DEX файлы: {stats['dex_files']}")
-    
+
     def _is_important_file(self, filepath: str) -> bool:
         filepath_lower = filepath.lower()
         if any(filepath_lower.endswith(ext) for ext in [
@@ -221,7 +222,7 @@ class AnalysisEngine:
         if filepath_lower == 'resources.arsc':
             return True
         return False
-    
+
     def _count_extracted_files(self) -> Dict:
         return {
             'total': len(list(self.decompiled_dir.rglob('*'))),
@@ -231,7 +232,7 @@ class AnalysisEngine:
         }
 
     # ==================== MANIFEST ANALYSIS ====================
-    
+
     def _parse_manifest_fast(self):
         manifest_path = self.decompiled_dir / "AndroidManifest.xml"
         if not manifest_path.exists():
@@ -247,13 +248,13 @@ class AnalysisEngine:
             self._log(f"✓ Манифест: {len(self.permissions)} разрешений, пакет: {self.manifest_info.get('package', 'N/A')}")
         except Exception as e:
             self._log(f"⚠ Ошибка парсинга манифеста: {e}")
-    
+
     def _parse_permissions_fast(self, content: str):
         permissions = set()
         patterns = [
-            r'android:name="(android\.permission\.[^"]+)"',
+            r'android:name="(android\.permission[^"]+)"',
             r'<uses-permission[^>]*android:name="([^"]+)"',
-            r'name="(android\.permission\.[^"]+)"',
+            r'name="(android\.permission[^"]+)"',
         ]
         for pattern in patterns:
             found = re.findall(pattern, content)
@@ -269,7 +270,7 @@ class AnalysisEngine:
                     "source": "manifest", "pattern": perm, "risk": "Critical",
                     "desc": f"Опасное разрешение: {perm}", "category": "Permission"
                 })
-    
+
     def _parse_app_info_fast(self, content: str):
         self.manifest_info = {}
         if match := re.search(r'package="([^"]+)"', content):
@@ -284,7 +285,7 @@ class AnalysisEngine:
             'receivers': len(re.findall(r'<receiver[^>]*>', content)),
             'providers': len(re.findall(r'<provider[^>]*>', content)),
         }
-    
+
     def _assess_permission_risk(self, permission: str) -> str:
         dangerous = {
             'READ_SMS': 'Critical', 'SEND_SMS': 'Critical', 'RECEIVE_SMS': 'Critical',
@@ -299,7 +300,7 @@ class AnalysisEngine:
             if key in permission:
                 return risk
         return 'Low'
-    
+
     def _get_permission_category(self, permission: str) -> str:
         categories = {
             'SMS': ['READ_SMS', 'SEND_SMS', 'RECEIVE_SMS'],
@@ -318,7 +319,7 @@ class AnalysisEngine:
         return 'OTHER'
 
     # ==================== OSINT RESOURCES ====================
-    
+
     def _extract_osint_resources(self):
         self._log("🔍 Анализ ресурсов...")
         strings_xml = self.decompiled_dir / "res" / "values" / "strings.xml"
@@ -333,8 +334,8 @@ class AnalysisEngine:
         arsc_file = self.decompiled_dir / "resources.arsc"
         if arsc_file.exists():
             self._extract_strings_from_arsc(arsc_file)
-        self._log(f"✓ OSINT: {len(self.osint_data.get('urls', []))} URL, {len(self.osint_data.get('api_keys', []))} API keys")
-    
+        self._log(f"✓ OSINT: {len(self.osint_data.get('urls', []))} URL, {len(self.osint_data.get('api_keys', []))} Ключи API")
+
     def _parse_strings_xml(self, filepath: Path):
         try:
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
@@ -358,7 +359,7 @@ class AnalysisEngine:
                         })
         except Exception as e:
             self._log(f"⚠ Ошибка парсинга strings.xml: {e}")
-    
+
     def _scan_assets(self, assets_dir: Path):
         for filepath in assets_dir.rglob('*'):
             if filepath.is_file():
@@ -389,7 +390,7 @@ class AnalysisEngine:
                             })
                 except:
                     continue
-    
+
     def _scan_raw_resources(self, raw_dir: Path):
         for filepath in raw_dir.rglob('*'):
             if filepath.is_file():
@@ -410,7 +411,7 @@ class AnalysisEngine:
                                     self.network_indicators[net_type].extend(matches[:5])
                     except:
                         pass
-    
+
     def _extract_strings_from_arsc(self, arsc_path: Path):
         try:
             with open(arsc_path, 'rb') as f:
@@ -425,7 +426,7 @@ class AnalysisEngine:
                     pass
         except Exception as e:
             self._log(f"⚠ Ошибка чтения resources.arsc: {e}")
-    
+
     def _looks_like_api_key(self, value: str) -> bool:
         if len(value) < 20:
             return False
@@ -434,7 +435,7 @@ class AnalysisEngine:
             r'sk-[A-Za-z0-9]{48}', r'gh[pousr]_[A-Za-z0-9]{36}',
         ]
         return any(re.match(p, value) for p in key_patterns)
-    
+
     def _extract_network_indicators(self):
         self._log("🔍 Поиск сетевых индикаторов...")
         for filepath in self.decompiled_dir.rglob('*'):
@@ -457,7 +458,7 @@ class AnalysisEngine:
         self._log(f"✓ Найдено сетевых индикаторов: {total_urls}")
 
     # ==================== DEX ANALYSIS VIA JADX ====================
-    
+
     def _analyze_dex_fast(self):
         jadx_cmd = self._find_jadx()
         if not jadx_cmd:
@@ -483,7 +484,7 @@ class AnalysisEngine:
                 return
         else:
             cmd = [jadx_cmd, "-d", output_dir, "-j", "4", "--no-replace-consts",
-                   "--show-bad-code", "--no-inline-methods", input_file]
+                    "--show-bad-code", "--no-inline-methods", input_file]
             env = os.environ.copy()
             env['JAVA_OPTS'] = '-Xmx4G'
             try:
@@ -499,7 +500,7 @@ class AnalysisEngine:
             self._scan_java_for_threats(java_files)
         else:
             self._log("⚠ jadx не создал Java файлы")
-    
+
     def _find_jadx(self) -> Optional[str]:
         self._log("🔍 Поиск jadx...")
         jadx_names = ["jadx", "jadx.bat", "jadx.exe"]
@@ -514,7 +515,7 @@ class AnalysisEngine:
                 return path
         self._log("✗ jadx не найден")
         return None
-    
+
     def _scan_java_for_threats(self, java_files: List[Path]):
         threat_patterns = [
             {"pattern": "Runtime.getRuntime().exec", "risk": "Critical", "desc": "Выполнение системных команд", "category": "Code Execution"},
@@ -532,14 +533,14 @@ class AnalysisEngine:
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
-                    for threat in threat_patterns:
-                        if threat["pattern"] in content:
-                            rel_path = str(file_path.relative_to(self.decompiled_dir))
-                            self.threats.append({
-                                "file": rel_path, "pattern": threat["pattern"],
-                                "risk": threat["risk"], "desc": threat["desc"],
-                                "category": threat["category"]
-                            })
+                for threat in threat_patterns:
+                    if threat["pattern"] in content:
+                        rel_path = str(file_path.relative_to(self.decompiled_dir))
+                        self.threats.append({
+                            "file": rel_path, "pattern": threat["pattern"],
+                            "risk": threat["risk"], "desc": threat["desc"],
+                            "category": threat["category"]
+                        })
             except:
                 continue
         
@@ -554,7 +555,48 @@ class AnalysisEngine:
         self._log(f"✓ Найдено уникальных угроз: {len(self.threats):,}")
 
     # ==================== NATIVE LIBS ANALYSIS (PYGHIDRA) ====================
-    
+
+    def _initialize_ghidra_environment(self):
+        """Инициализация окружения PyGhidra (Единоразово)"""
+        if self.ghidra_initialized:
+            return
+        
+        if not PYGHIDRA_AVAILABLE:
+            raise ImportError("PyGhidra не установлен")
+        
+        # Проверка JAVA_HOME
+        if not os.environ.get('JAVA_HOME'):
+            self._log("⚠ Переменная окружения JAVA_HOME не установлена. Попытка автоматического поиска...")
+            self._log("⚠ Рекомендуется установить JAVA_HOME для стабильной работы Ghidra")
+        
+        self._log("🔧 Инициализация PyGhidra...")
+        try:
+            # ✅ ПРОВЕРКА: Не запущена ли Виртуальная Машина Java уже
+            if pyghidra.started():
+                self._log("✓ Виртуальная Машина Java уже запущена, используем существующую")
+                self.ghidra_initialized = True
+                return
+            
+            # ✅ ИСПРАВЛЕНИЕ: Использование HeadlessPyGhidraLauncher для конфигурации JVM
+            launcher = HeadlessPyGhidraLauncher()
+            
+            # Добавление аргументов Виртуальной Машины Java (каждый аргумент отдельно!)
+            launcher.add_vmargs(
+                "-Xms1G",
+                "-Xmx4G",
+                "-XX:+UseG1GC",
+                "-Djava.security.egd=file:/dev/urandom"
+            )
+            
+            # Запуск Виртуальной Машины Java
+            launcher.start()
+            
+            self.ghidra_initialized = True
+            self._log("✓ PyGhidra успешно инициализирован")
+        except Exception as e:
+            self._log(f"✗ Ошибка инициализации PyGhidra: {e}")
+            raise
+
     def _analyze_native_pyghidra(self):
         """Анализ .so через PyGhidra API (Python 3)"""
         if not PYGHIDRA_AVAILABLE:
@@ -573,8 +615,16 @@ class AnalysisEngine:
         
         self._log(f"📦 К анализу: {len(target_libs)} из {len(so_files)} библиотек")
         
+        # ✅ ИНИЦИАЛИЗАЦИЯ ОДНОРАЗОВО ПЕРЕД ЦИКЛОМ
+        try:
+            self._initialize_ghidra_environment()
+        except Exception as e:
+            self._log(f"✗ Не удалось инициализировать окружение Ghidra: {e}")
+            # Помечаем, что анализ не состоялся, чтобы не начислять ложные баллы риска
+            self.ghidra_initialized = False
+            return
+        
         # ✅ ДОБАВИТЬ: Путь к текущему скрипту в sys.path
-        import sys
         script_dir = Path(__file__).parent.resolve()
         if str(script_dir) not in sys.path:
             sys.path.insert(0, str(script_dir))
@@ -593,23 +643,24 @@ class AnalysisEngine:
                 from native_analyzer import analyze_native_library
                 
                 # Запуск анализа через PyGhidra API
-                results = analyze_native_library(str(lib_path.resolve()), output_json)
+                # Передаем флаг, что Виртуальная Машина Java уже запущена
+                results = analyze_native_library(str(lib_path.resolve()), output_json, jvm_already_started=True)
                 
                 self._parse_native_json(output_json, lib_name)
-                self._log(f"✓ Завершено: {lib_name} ({os.path.getsize(output_json)/1024:.1f} KB)")
+                self._log(f"✓ Завершено: {lib_name} ({os.path.getsize(output_json)/1024:.1f} Килобайт)")
                 
             except Exception as e:
                 self._log(f"✗ Ошибка {lib_name}: {e}")
                 import traceback
-                self._log(f"📋 Traceback:\n{traceback.format_exc()}")
-    
+                self._log(f"📋 Трассировка:\n{traceback.format_exc()}")
+
     def _should_analyze_library(self, lib_name: str) -> bool:
         if lib_name in self.SYSTEM_LIBS:
             self._log(f"⊘ Пропущена системная: {lib_name}")
             return False
         self._log(f"✓ Кастомная библиотека: {lib_name}")
         return True
-    
+
     def _parse_native_json(self, json_path: str, lib_name: str):
         try:
             with open(json_path, "r", encoding="utf-8") as f:
@@ -650,7 +701,7 @@ class AnalysisEngine:
             self._log(f"⚠ Ошибка парсинга {json_path}: {e}")
 
     # ==================== THREAT CORRELATION & RISK SCORE ====================
-    
+
     def _correlate_threats(self):
         for url in self.network_indicators.get('url', []):
             if any(kw in url.lower() for kw in ['malware', 'evil', 'hack', 'exploit']):
@@ -677,7 +728,7 @@ class AnalysisEngine:
                 seen.add(key)
                 unique.append(t)
         self.threats = unique
-    
+
     def _calculate_risk_score(self):
         score = 0
         score += sum(1 for t in self.threats if t["risk"] == "Critical") * 15
@@ -686,15 +737,19 @@ class AnalysisEngine:
         score += sum(1 for t in self.threats if t["risk"] == "Low") * 1
         dangerous_perms = sum(1 for p in self.permissions if p["risk"] in ["Critical", "High"])
         score += dangerous_perms * 5
-        native_threats = sum(1 for t in self.threats if t["category"].startswith("Native_"))
-        score += native_threats * 10
+        
+        # ✅ ИСПРАВЛЕНИЕ: Начислять баллы за native только если инициализация прошла успешно
+        if self.ghidra_initialized:
+            native_threats = sum(1 for t in self.threats if t["category"].startswith("Native_"))
+            score += native_threats * 10
+        
         suspicious_urls = sum(1 for u in self.network_indicators.get('url', []) 
                             if any(kw in u.lower() for kw in ['malware', 'evil', 'hack']))
         score += suspicious_urls * 12
         score += len(self.dynamic_load_calls) * 10
         self.risk_score = min(score, 100)
-        self._log(f"🎯 Risk Score: {self.risk_score}/100")
-    
+        self._log(f"🎯 Оценка Риска: {self.risk_score}/100")
+
     def _print_summary(self):
         risk_counts = defaultdict(int)
         for t in self.threats:
@@ -712,7 +767,7 @@ class AnalysisEngine:
         self._log(f"📦 Пакет: {self.manifest_info.get('package', 'N/A')}")
 
     # ==================== PUBLIC ACCESSORS ====================
-    
+
     def get_decompiled_files(self) -> List[Path]:
         if not self.decompiled_dir.exists():
             return []
