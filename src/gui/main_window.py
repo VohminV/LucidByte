@@ -1,34 +1,149 @@
 import os
 import sys
+import math
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QFileDialog, QStatusBar, QProgressBar,
     QLabel, QTabWidget, QTextEdit, QDockWidget,
     QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsLineItem,
     QMessageBox, QTreeWidget, QTreeWidgetItem, QListWidget,
-    QPushButton, QToolBar
+    QPushButton, QToolBar, QGraphicsItem
 )
-from PySide6.QtGui import QAction, QFont, QPen, QBrush, QColor, QIcon
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import (
+    QAction, QFont, QPen, QBrush, QColor, QIcon,
+    QPainter, QLinearGradient, QPainterPath, QPolygonF
+)
+from PySide6.QtCore import Qt, QThread, Signal, QRectF, QPointF
 import qdarkstyle
-
 from src.gui.widgets.code_editor import CodeEditor
 from src.gui.widgets.permission_tree import PermissionTree
 from src.gui.widgets.threat_list import ThreatList
 from src.gui.widgets.ai_chat import AiChatWidget
 from src.gui.workers.analysis_worker import AnalysisWorker
+from typing import Optional, List, Dict
 
 
-# ================= CALL GRAPH VIEW =================
+# ==================== GRAPH NODE ITEM ====================
+class GraphNodeItem(QGraphicsItem):
+    """Элемент узла графа с улучшенной отрисовкой"""
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self.text = text
+        self.setFlag(QGraphicsItem.ItemIsMovable)
+        self.setFlag(QGraphicsItem.ItemIsSelectable)
+        self.setAcceptHoverEvents(True)
+        self.width = 120
+        self.height = 40
+        self.setPos(0, 0)
+
+    def boundingRect(self):
+        return QRectF(0, 0, self.width, self.height)
+
+    def paint(self, painter, option, widget):
+        # Фон узла с градиентом
+        gradient = QLinearGradient(0, 0, 0, self.height)
+        if self.isSelected():
+            gradient.setColorAt(0, QColor("#FF6B6B"))
+            gradient.setColorAt(1, QColor("#C0392B"))
+        else:
+            gradient.setColorAt(0, QColor("#4A90D9"))
+            gradient.setColorAt(1, QColor("#2C3E50"))
+        
+        painter.setBrush(QBrush(gradient))
+        painter.setPen(QPen(QColor("#FFFFFF"), 2))
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Рисуем скругленный прямоугольник
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, self.width, self.height, 10, 10)
+        painter.drawPath(path)
+        
+        # Текст внутри узла
+        painter.setPen(QColor("#FFFFFF"))
+        # ИСПРАВЛЕНИЕ: Явное создание шрифта вместо обращения к option.font
+        painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        painter.drawText(self.boundingRect(), Qt.AlignCenter, self.text[:15])
+
+    def hoverEnterEvent(self, event):
+        self.update()
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self.update()
+        super().hoverLeaveEvent(event)
+
+
+# ==================== GRAPH EDGE ITEM ====================
+class GraphEdgeItem(QGraphicsItem):
+    """Элемент связи графа со стрелкой"""
+    def __init__(self, start_item, end_item, parent=None):
+        super().__init__(parent)
+        self.start_item = start_item
+        self.end_item = end_item
+        self.setFlag(QGraphicsItem.ItemIsSelectable)
+        self.setZValue(-1)
+
+    def boundingRect(self):
+        if not self.start_item or not self.end_item:
+            return QRectF()
+        return QRectF(self.start_item.pos(), self.end_item.pos()).normalized().adjusted(-10, -10, 10, 10)
+
+    def paint(self, painter, option, widget):
+        if not self.start_item or not self.end_item:
+            return
+        
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#888888"), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        
+        # Координаты центров узлов
+        start_pos = self.start_item.pos() + QPointF(self.start_item.width / 2, self.start_item.height / 2)
+        end_pos = self.end_item.pos() + QPointF(self.end_item.width / 2, self.end_item.height / 2)
+        
+        # Рисуем линию
+        painter.drawLine(start_pos, end_pos)
+        
+        # Рисуем стрелку
+        # ИСПРАВЛЕНИЕ: Используем math.atan2 для вычисления угла
+        angle = 0.0
+        dx = end_pos.x() - start_pos.x()
+        dy = end_pos.y() - start_pos.y()
+        if dx != 0 or dy != 0:
+            angle = math.atan2(dy, dx)
+        
+        arrow_size = 10
+        painter.setBrush(QColor("#888888"))
+        
+        # Вычисляем точки треугольника стрелки
+        arrow_point1 = QPointF(
+            end_pos.x() - arrow_size * math.cos(angle - math.pi / 6),
+            end_pos.y() - arrow_size * math.sin(angle - math.pi / 6)
+        )
+        arrow_point2 = QPointF(
+            end_pos.x() - arrow_size * math.cos(angle + math.pi / 6),
+            end_pos.y() - arrow_size * math.sin(angle + math.pi / 6)
+        )
+        
+        # ИСПРАВЛЕНИЕ: Создаем QPolygonF и передаем как единый аргумент
+        arrow_polygon = QPolygonF([
+            end_pos,
+            arrow_point1,
+            arrow_point2
+        ])
+        painter.drawPolygon(arrow_polygon)
+
+
+# ==================== CALL GRAPH VIEW ====================
 class CallGraphView(QGraphicsView):
-    """Вьюер графа вызовов функций"""
-    
+    """Вьюер графа вызовов функций с улучшенной визуализацией"""
     def __init__(self):
         super().__init__()
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
-        self.setRenderHint(self.renderHints())
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setStyleSheet("""
             QGraphicsView {
                 background: #1e1e1e;
@@ -36,53 +151,56 @@ class CallGraphView(QGraphicsView):
                 border-radius: 4px;
             }
         """)
+        self.zoom_level = 1.0
+
+    def wheelEvent(self, event):
+        """Обработка колеса мыши для масштабирования"""
+        factor = 1.15
+        if event.angleDelta().y() > 0:
+            self.scale(factor, factor)
+            self.zoom_level *= factor
+        else:
+            self.scale(1 / factor, 1 / factor)
+            self.zoom_level /= factor
+        event.accept()
 
     def draw_graph(self, graph_data: dict):
-        """Отрисовка графа вызовов"""
+        """Отрисовка графа вызовов с использованием новых элементов"""
         self.scene.clear()
-        positions = {}
-        radius = 25
-        spacing = 150
-
-        # Позиционирование узлов
-        for i, node in enumerate(graph_data.keys()):
-            x = (i % 5) * spacing
-            y = (i // 5) * spacing
-            positions[node] = (x, y)
-
-        # Отрисовка узлов
-        for node, (x, y) in positions.items():
-            circle = QGraphicsEllipseItem(x, y, radius, radius)
-            circle.setBrush(QBrush(QColor("#4A90D9")))
-            circle.setPen(QPen(QColor("#FFFFFF"), 2))
-            circle.setToolTip(node)
-            self.scene.addItem(circle)
+        nodes = {}
+        spacing_x = 150
+        spacing_y = 100
+        
+        # Позиционирование узлов (упрощенная иерархия)
+        sorted_nodes = list(graph_data.keys())
+        
+        for i, node_name in enumerate(sorted_nodes):
+            # Расчет позиции (можно улучшить алгоритмом Force-Directed)
+            x = (i % 5) * spacing_x
+            y = (i // 5) * spacing_y
             
-            # Добавление подписи
-            label = QGraphicsScene()
-            text = self.scene.addText(node.split('.')[-1][:15])
-            text.setPos(x + radius, y)
-            text.setDefaultTextColor(QColor("#FFFFFF"))
-
+            node_item = GraphNodeItem(node_name.split('.')[-1][:15])
+            node_item.setPos(x, y)
+            self.scene.addItem(node_item)
+            nodes[node_name] = node_item
+        
         # Отрисовка связей
-        pen = QPen(QColor("#888888"), 2)
         for src, targets in graph_data.items():
+            if src not in nodes:
+                continue
             for dst in targets:
-                if dst in positions:
-                    x1, y1 = positions[src]
-                    x2, y2 = positions[dst]
-                    line = QGraphicsLineItem(
-                        x1 + radius/2, y1 + radius/2,
-                        x2 + radius/2, y2 + radius/2
-                    )
-                    line.setPen(pen)
-                    self.scene.addItem(line)
+                if dst in nodes:
+                    edge = GraphEdgeItem(nodes[src], nodes[dst])
+                    self.scene.addItem(edge)
+
+    def clear_graph(self):
+        """Очистка графа"""
+        self.scene.clear()
 
 
-# ================= MAIN WINDOW =================
+# ==================== MAIN WINDOW ====================
 class MainWindow(QMainWindow):
     """Главное окно приложения LucidByte"""
-    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("LucidByte - Android Malware Analysis Platform")
@@ -98,7 +216,7 @@ class MainWindow(QMainWindow):
         self.setup_menu()
         self.setup_toolbar()
         self.setup_interface()
-        self.setup_docks()
+        self.setup_docks() 
         self.setup_status_bar()
         self.apply_style()
 
@@ -329,10 +447,10 @@ class MainWindow(QMainWindow):
             self.current_apk_path = path
             filename = os.path.basename(path)
             self.status_label.setText(f"📱 {filename}")
-            self.log(f"=" * 60)
+            self.log("=" * 60)
             self.log(f"✓ APK загружен: {path}")
             self.log(f"📊 Размер: {os.path.getsize(path) / 1024 / 1024:.2f} MB")
-            self.log(f"=" * 60)
+            self.log("=" * 60)
             self.load_demo_graph()
             # Автоматический запуск анализа
             self.start_analysis()
@@ -359,10 +477,10 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(True)
         self.progress.setValue(0)
         self.status_label.setText("🔄 Анализ...")
-        self.log(f"=" * 60)
+        self.log("=" * 60)
         self.log("🚀 Запуск анализа...")
         self.log(f"📁 Файл: {self.current_apk_path}")
-        self.log(f"=" * 60)
+        self.log("=" * 60)
 
         # Создание и запуск рабочего потока
         self.analysis_worker = AnalysisWorker(self.current_apk_path)
@@ -704,11 +822,11 @@ class MainWindow(QMainWindow):
             if reply == QMessageBox.Yes:
                 self.analysis_worker.terminate()
                 event.accept()
-            else:
+            else: 
                 event.ignore()
         else:
             event.accept()
-            
+        
     def show_statistics(self):
         """Отображение детальной статистики анализа"""
         if not hasattr(self, 'analysis_worker') or not self.analysis_worker:
@@ -723,7 +841,7 @@ class MainWindow(QMainWindow):
         📊 LUCIDBYTE ANALYSIS STATISTICS
         ════════════════════════════════════════════════════════════
         
-        📁 ФАЙЛЫ
+        📁  ФАЙЛЫ
         ────────────────────────────────────────────────────────────
         Java файлов:     {stats.get('total_java_files', 0):>10,}
         XML файлов:      {stats.get('total_xml_files', 0):>10,}
