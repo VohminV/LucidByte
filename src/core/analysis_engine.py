@@ -14,7 +14,6 @@ from datetime import datetime
 try:
     import pyghidra
     import jpype
-    from pyghidra.launcher import HeadlessPyGhidraLauncher
     PYGHIDRA_AVAILABLE = True
 except ImportError:
     PYGHIDRA_AVAILABLE = False
@@ -557,7 +556,7 @@ class AnalysisEngine:
     # ==================== NATIVE LIBS ANALYSIS (PYGHIDRA) ====================
 
     def _initialize_ghidra_environment(self):
-        """Инициализация окружения PyGhidra (Единоразово)"""
+        """Инициализация окружения PyGhidra БЕЗ ручной передачи аргументов памяти"""
         if self.ghidra_initialized:
             return
         
@@ -566,33 +565,24 @@ class AnalysisEngine:
         
         # Проверка JAVA_HOME
         if not os.environ.get('JAVA_HOME'):
-            self._log("⚠ Переменная окружения JAVA_HOME не установлена. Попытка автоматического поиска...")
+            self._log("⚠ Переменная окружения JAVA_HOME не установлена.")
             self._log("⚠ Рекомендуется установить JAVA_HOME для стабильной работы Ghidra")
         
         self._log("🔧 Инициализация PyGhidra...")
         try:
-            # ✅ ПРОВЕРКА: Не запущена ли Виртуальная Машина Java уже
+            # ✅ ПРОВЕРКА: Не запущена ли уже Виртуальная Машина Java
             if pyghidra.started():
                 self._log("✓ Виртуальная Машина Java уже запущена, используем существующую")
                 self.ghidra_initialized = True
                 return
             
-            # ✅ ИСПРАВЛЕНИЕ: Использование HeadlessPyGhidraLauncher для конфигурации JVM
-            launcher = HeadlessPyGhidraLauncher()
-            
-            # Добавление аргументов Виртуальной Машины Java (каждый аргумент отдельно!)
-            launcher.add_vmargs(
-                "-Xms1G",
-                "-Xmx4G",
-                "-XX:+UseG1GC",
-                "-Djava.security.egd=file:/dev/urandom"
-            )
-            
-            # Запуск Виртуальной Машины Java
-            launcher.start()
+            # ✅ ИСПРАВЛЕНИЕ: Запуск БЕЗ передачи аргументов памяти.
+            # PyGhidra будет использовать значения по умолчанию или из переменных окружения системы.
+            # Это полностью исключает ошибку "Invalid initial heap size".
+            pyghidra.start()
             
             self.ghidra_initialized = True
-            self._log("✓ PyGhidra успешно инициализирован")
+            self._log("✓ PyGhidra успешно инициализирован (настройки памяти по умолчанию)")
         except Exception as e:
             self._log(f"✗ Ошибка инициализации PyGhidra: {e}")
             raise
@@ -738,7 +728,7 @@ class AnalysisEngine:
         dangerous_perms = sum(1 for p in self.permissions if p["risk"] in ["Critical", "High"])
         score += dangerous_perms * 5
         
-        # ✅ ИСПРАВЛЕНИЕ: Начислять баллы за native только если инициализация прошла успешно
+        # ✅ ИСПРАВЛЕНИЕ: Начислять баллы за native ТОЛЬКО если инициализация прошла успешно
         if self.ghidra_initialized:
             native_threats = sum(1 for t in self.threats if t["category"].startswith("Native_"))
             score += native_threats * 10

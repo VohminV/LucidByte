@@ -148,23 +148,15 @@ def analyze_native_library(lib_path: str, output_json: str, jvm_already_started:
 
     print(f"🔍 Анализ: {lib_path}")
 
-    # Проверка состояния Виртуальной Машины Java
-    if not jvm_already_started:
-        if jpype.isJVMStarted():
-            print("⚠ Виртуальная Машина Java уже запущена. Используем существующую.")
-            jvm_already_started = True
-        else:
-            # Проверка JAVA_HOME
-            if not os.environ.get('JAVA_HOME'):
-                print("⚠ Переменная окружения JAVA_HOME не установлена.")
-
     try:
         # Открытие программы через PyGhidra
-        # Если Виртуальная Машина Java уже запущена, pyghidra.open_program должен использовать её
-        with pyghidra.open_program(lib_path, analyze=False) as program:
-            # Запуск анализа
+        with pyghidra.open_program(lib_path, analyze=False) as flat_api:
+            # ✅ ИСПРАВЛЕНИЕ: Получение объекта Program из FlatProgramAPI
+            program = flat_api.getCurrentProgram()
+            
+            # Запуск анализа (теперь с правильным объектом Program)
             print("  ▶ Запуск анализа...")
-            program.analyze()
+            pyghidra.analyze(program)
             
             # Извлечение индикаторов
             extractor = NativeIndicatorExtractor(program)
@@ -181,7 +173,7 @@ def analyze_native_library(lib_path: str, output_json: str, jvm_already_started:
             return results
     except RuntimeError as e:
         if "Unable to start JVM" in str(e):
-            print("✗ Ошибка: Не удалось запустить Виртуальную Машину Java. Убедитесь, что она не запущена дважды.")
+            print("✗ Ошибка: Не удалось запустить Виртуальную Машину Java.")
         raise e
 
 
