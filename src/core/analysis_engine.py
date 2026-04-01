@@ -24,13 +24,23 @@ try:
 except ImportError:
     ELF_TOOLS_AVAILABLE = False
 
+# ✅ ИМПОРТ СИГНАТУРНЫХ МОДУЛЕЙ
+try:
+    from .signature_manager import SignatureManager
+    from .signature_scanner import SignatureScanner, SignatureScanResult
+    SIGNATURE_MODULES_AVAILABLE = True
+except ImportError as e:
+    SIGNATURE_MODULES_AVAILABLE = False
+    # Логирование ошибки импорта для отладки
+    import logging
+    logging.warning(f"Не удалось импортировать сигнатурные модули: {e}. Сигнатурный анализ отключен.")
 
 class AnalysisEngine:
     """
     Ядро статического анализа файлов APK (Издание PyGhidra)
     Архитектура Готовая к Производству - Python 3 Native
     """
-
+    
     SYSTEM_LIBS = {
         'libc++_shared.so', 'libc++.so', 'liblog.so', 'libm.so', 'libz.so',
         'libdl.so', 'libstdc++.so', 'libssl.so', 'libcrypto.so', 'libEGL.so',
@@ -43,10 +53,10 @@ class AnalysisEngine:
     }
 
     NETWORK_PATTERNS = {
-        'url': re.compile(r'https?://[^\s "\'<>]+', re.I),
+        'url': re.compile(r'https?://[^\s"\'<>]+', re.I),
         'ip': re.compile(r'\b\d{1,3}(?:\.\d{1,3}){3}\b'),
         'domain': re.compile(r'[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?'),
-        'websocket': re.compile(r'wss?://[^\s "\'<>]+', re.I),
+        'websocket': re.compile(r'wss?://[^\s"\'<>]+', re.I),
     }
 
     DYNAMIC_LOAD_PATTERNS = [
@@ -60,11 +70,9 @@ class AnalysisEngine:
         self.decompiled_dir = self.temp_dir / "decompiled"
         self.ghidra_scripts_dir = Path(__file__).parent / "ghidra_scripts"
         self.ghidra_input_dir = self.temp_dir / "ghidra_input"
-        # ✅ ДОБАВЛЕНО: Директория для отчетов анализа Ghidra
         self.ghidra_report_dir = self.temp_dir / "ghidra_reports"
         self.apk_path: Optional[Path] = None
 
-        # ✅ ИСПРАВЛЕНО: Все переменные с корректными именами
         self.manifest_data: str = ""
         self.manifest_info: Dict = {}
         self.permissions: List[Dict] = []
@@ -75,7 +83,6 @@ class AnalysisEngine:
         self.threats: List[Dict] = []
         self.osint_data: Dict = {}
         self.signature_info: Dict = {}
-
         self.statistics: Dict = {}
         self.risk_score: int = 0
 
@@ -83,6 +90,15 @@ class AnalysisEngine:
         self.log_callback: Optional[Callable] = None
         self.use_ghidra: bool = True
         self.ghidra_initialized: bool = False
+        
+        # ✅ ИНИЦИАЛИЗАЦИЯ СИГНАТУРНЫХ МОДУЛЕЙ
+        self.signature_manager: Optional[SignatureManager] = None
+        self.signature_scanner: Optional[SignatureScanner] = None
+        self.signature_scan_result: Optional[SignatureScanResult] = None
+        
+        if SIGNATURE_MODULES_AVAILABLE:
+            self.signature_manager = SignatureManager()
+            self.signature_scanner = SignatureScanner(self.signature_manager)
 
     def set_progress_callback(self, callback: Callable[[int, str], None]):
         self.progress_callback = callback
@@ -150,26 +166,38 @@ class AnalysisEngine:
             self._log(f"📁 Файл: {apk_path}")
             self._log(f"📊 Размер: {os.path.getsize(apk_path) / 1024 / 1024:.2f} Мегабайт")
             self._log(f"🔧 PyGhidra: {'доступен' if PYGHIDRA_AVAILABLE else 'НЕ доступен'}")
+            self._log(f"🔧 Signature Scanner: {'доступен' if SIGNATURE_MODULES_AVAILABLE else 'НЕ доступен'}")
             self._log("=" * 70)
 
             if self.decompiled_dir.exists():
                 shutil.rmtree(self.decompiled_dir)
             self.decompiled_dir.mkdir(parents=True, exist_ok=True)
             self.ghidra_input_dir.mkdir(parents=True, exist_ok=True)
-            # ✅ ДОБАВЛЕНО: Создание директории для отчетов
             self.ghidra_report_dir.mkdir(parents=True, exist_ok=True)
 
-            self._progress(5, "Распаковка и быстрый анализ...")
+            # ✅ СИГНАТУРНАЯ ПРОВЕРКА НА ПЕРВОМ ЭТАПЕ (5%)
+            self._progress(5, "Сигнатурная проверка...")
+            signature_threat_detected = self._perform_signature_scan()
+            
+            # Если найдена критическая угроза по сигнатуре - прекращаем анализ
+            if signature_threat_detected:
+                self._log("⚠️ Обнаружена известная угроза по сигнатуре. Анализ прекращён.")
+                self._progress(100, "Анализ завершен (сигнатурное совпадение)")
+                self._calculate_risk_score()
+                self._print_summary()
+                return True
+
+            self._progress(15, "Распаковка и быстрый анализ...")
             self._extract_apk_structure()
 
-            self._progress(15, "Анализ манифеста...")
+            self._progress(25, "Анализ манифеста...")
             self._parse_manifest_fast()
 
-            self._progress(25, "Извлечение OSINT-индикаторов...")
+            self._progress(35, "Извлечение OSINT-индикаторов...")
             self._extract_osint_resources()
             self._extract_network_indicators()
 
-            self._progress(40, "Анализ DEX (jadx)...")
+            self._progress(50, "Анализ DEX (jadx)...")
             self._analyze_dex_fast()
 
             if self.use_ghidra:
@@ -195,6 +223,106 @@ class AnalysisEngine:
             self._log(f"✗ Ошибка анализа: {str(exception)}")
             self._log(f"📋 Трассировка:\n{traceback.format_exc()}")
             return False
+
+    # ==================== SIGNATURE SCANNING ====================
+    
+    def _perform_signature_scan(self) -> bool:
+        """
+        Выполнение сигнатурного сканирования
+        Returns:
+            True если найдено критическое совпадение, False иначе
+        """
+        if not SIGNATURE_MODULES_AVAILABLE or not self.signature_scanner:
+            self._log("⚠ Сигнатурные модули недоступны, пропускаем проверку")
+            return False
+        
+        try:
+            # Обновление базы сигнатур (если необходимо)
+            if self.signature_manager and self.signature_manager.needs_update():
+                self._log("🔄 Обновление базы сигнатур...")
+                try:
+                    update_result = self.signature_manager.update_signatures()
+                    self._log(f"✓ Обновлено: {update_result.get('hashes_added', 0)} хешей, "
+                             f"{update_result.get('rules_added', 0)} правил")
+                except Exception as e:
+                    self._log(f"⚠ Ошибка обновления сигнатур: {e}")
+                    self._log("⚠ Используем последнюю локальную копию базы")
+            
+            # Сканирование файла
+            self._log(f"🔍 Сигнатурное сканирование: {self.apk_path.name}")
+            self.signature_scan_result = self.signature_scanner.scan(str(self.apk_path))
+            
+            # Обработка результатов
+            if self.signature_scan_result.has_match:
+                self._log(f"⚠️ НАЙДЕНО СОВПАДЕНИЕ: {self.signature_scanner.get_scan_summary(self.signature_scan_result)}")
+                
+                # Добавление угроз в список
+                self._add_signature_threats()
+                
+                # Возвращаем True для критических совпадений
+                if self.signature_scan_result.risk_level == "Critical":
+                    return True
+            
+            else:
+                self._log("✅ Сигнатурных совпадений не найдено")
+            
+            return False
+            
+        except Exception as e:
+            self._log(f"⚠ Ошибка сигнатурного сканирования: {e}")
+            return False
+    
+    def _add_signature_threats(self):
+        """Добавление угроз из результатов сигнатурного сканирования"""
+        if not self.signature_scan_result:
+            return
+        
+        # Хеш-совпадение (критическое)
+        if self.signature_scan_result.hash_match:
+            self.threats.append({
+                'source': 'signature_hash',
+                'pattern': self.signature_scan_result.hash_match['value'],
+                'risk': 'Critical',
+                'desc': f"Известный вредоносный образец: {self.signature_scan_result.hash_match['threat_name']}",
+                'category': 'Signature_Hash',
+                'confidence': self.signature_scan_result.hash_match['confidence'],
+                'family': self.signature_scan_result.hash_match.get('family', 'Unknown')
+            })
+        
+        # YARA совпадения
+        for yara_match in self.signature_scan_result.yara_matches:
+            self.threats.append({
+                'source': 'signature_yara',
+                'pattern': yara_match['rule_name'],
+                'risk': 'High',
+                'desc': f"YARA правило: {yara_match['threat_name']}",
+                'category': 'Signature_YARA',
+                'confidence': yara_match['confidence'],
+                'family': yara_match.get('family', 'Unknown')
+            })
+        
+        # Fuzzy hash совпадения
+        if self.signature_scan_result.fuzzy_match:
+            self.threats.append({
+                'source': 'signature_fuzzy',
+                'pattern': self.signature_scan_result.fuzzy_match['value'],
+                'risk': 'Medium',
+                'desc': f"Похожий образец: {self.signature_scan_result.fuzzy_match['threat_name']}",
+                'category': 'Signature_Fuzzy',
+                'confidence': self.signature_scan_result.fuzzy_match['confidence'],
+                'family': self.signature_scan_result.fuzzy_match.get('family', 'Unknown')
+            })
+        
+        # Сохранение информации о сигнатурном сканировании
+        self.signature_info = {
+            'scanned': True,
+            'has_match': self.signature_scan_result.has_match,
+            'risk_level': self.signature_scan_result.risk_level,
+            'hash_match': self.signature_scan_result.hash_match,
+            'yara_matches': self.signature_scan_result.yara_matches,
+            'fuzzy_match': self.signature_scan_result.fuzzy_match,
+            'scan_errors': self.signature_scan_result.scan_errors
+        }
 
     # ==================== APK EXTRACTION ====================
 
@@ -260,9 +388,9 @@ class AnalysisEngine:
     def _parse_permissions_fast(self, content: str):
         permissions = set()
         patterns = [
-            r'android:name="(android\.permission[^ "]+)"',
-            r'<uses-permission[^>]*android:name="([^ "]+)"',
-            r'name="(android\.permission[^ "]+)"',
+            r'android:name="(android\.permission[^"]+)"',
+            r'<uses-permission[^>]*android:name="([^"]+)"',
+            r'name="(android\.permission[^"]+)"',
         ]
         for pattern in patterns:
             found = re.findall(pattern, content)
@@ -281,9 +409,9 @@ class AnalysisEngine:
 
     def _parse_app_info_fast(self, content: str):
         self.manifest_info = {}
-        if match := re.search(r'package="([^ "]+)"', content):
+        if match := re.search(r'package="([^"]+)"', content):
             self.manifest_info['package'] = match.group(1)
-        if match := re.search(r'versionName="([^ "]+)"', content):
+        if match := re.search(r'versionName="([^"]+)"', content):
             self.manifest_info['version'] = match.group(1)
         if match := re.search(r'targetSdkVersion="(\d+)"', content):
             self.manifest_info['target_sdk'] = int(match.group(1))
@@ -348,7 +476,7 @@ class AnalysisEngine:
         try:
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as file_handle:
                 content = file_handle.read()
-            strings = re.findall(r'<string[^>]*name="([^ "]+)"[^>]*>([^<]+)</string>', content)
+            strings = re.findall(r'<string[^>]*name="([^"]+)"[^>]*>([^<]+)</string>', content)
             for name, value in strings:
                 for net_type, pattern in self.NETWORK_PATTERNS.items():
                     if matches := pattern.findall(value):
@@ -486,18 +614,18 @@ class AnalysisEngine:
             environment['JAVA_OPTS'] = '-Xmx4G'
             try:
                 subprocess.run(command, shell=True, capture_output=True, text=True,
-                               timeout=900, encoding='utf-8', errors='ignore', env=environment)
+                                timeout=900, encoding='utf-8', errors='ignore', env=environment)
             except Exception as exception:
                 self._log(f"✗ Ошибка jadx: {exception}")
                 return
         else:
             command = [jadx_cmd, "-d", output_dir, "-j", "4", "--no-replace-consts",
-                       "--show-bad-code", "--no-inline-methods", input_file]
+                        "--show-bad-code", "--no-inline-methods", input_file]
             environment = os.environ.copy()
             environment['JAVA_OPTS'] = '-Xmx4G'
             try:
                 subprocess.run(command, capture_output=True, text=True,
-                               timeout=900, encoding='utf-8', errors='ignore', env=environment)
+                                timeout=900, encoding='utf-8', errors='ignore', env=environment)
             except Exception as exception:
                 self._log(f"✗ Ошибка jadx: {exception}")
                 return
@@ -618,7 +746,6 @@ class AnalysisEngine:
         for idx, lib_path in enumerate(target_libs):
             lib_name = lib_path.name
             arch = self._get_arch(lib_path)
-            # ✅ ИСПРАВЛЕНО: Сохранение в специализированную директорию отчетов
             output_json = str((self.ghidra_report_dir / f"ghidra_{lib_name}.json").resolve())
 
             self._log(f"[{idx + 1}/{len(target_libs)}] 🔄 Анализ: {lib_name} (arch: {arch})")
@@ -703,20 +830,39 @@ class AnalysisEngine:
         self.threats = unique
 
     def _calculate_risk_score(self):
+        """
+        Расчет итоговой оценки риска
+        ✅ ОБНОВЛЕНО: Учёт результатов сигнатурной проверки
+        """
         score = 0
+        
+        # ✅ КРИТИЧЕСКОЕ ПРАВИЛО: Сигнатурное совпадение = максимальный риск
+        if self.signature_info.get('has_match', False):
+            if self.signature_info.get('risk_level') == 'Critical':
+                self.risk_score = 100
+                self._log("🎯 Оценка Риска: 100/100 (сигнатурное совпадение)")
+                return
+            elif self.signature_info.get('risk_level') == 'High':
+                score += 50  # Значительное увеличение для YARA совпадений
+        
+        # Стандартный расчет рисков
         score += sum(1 for threat in self.threats if threat["risk"] == "Critical") * 15
         score += sum(1 for threat in self.threats if threat["risk"] == "High") * 8
         score += sum(1 for threat in self.threats if threat["risk"] == "Medium") * 3
         score += sum(1 for threat in self.threats if threat["risk"] == "Low") * 1
+        
         dangerous_perms = sum(1 for permission in self.permissions if permission["risk"] in ["Critical", "High"])
         score += dangerous_perms * 5
+        
         if self.ghidra_initialized:
             native_threats = sum(1 for threat in self.threats if threat["category"].startswith("Native_"))
             score += native_threats * 10
+        
         suspicious_urls = sum(1 for url in self.network_indicators.get('url', [])
                               if any(keyword in url.lower() for keyword in ['malware', 'evil', 'hack']))
         score += suspicious_urls * 12
         score += len(self.dynamic_load_calls) * 10
+        
         self.risk_score = min(score, 100)
         self._log(f"🎯 Оценка Риска: {self.risk_score}/100")
 
@@ -734,6 +880,10 @@ class AnalysisEngine:
         self._log(f"🔐 Разрешений: {len(self.permissions)}")
         self._log(f"🌐 URL индикаторов: {len(self.network_indicators.get('url', []))}")
         self._log(f"📦 Пакет: {self.manifest_info.get('package', 'N/A')}")
+        
+        # ✅ ДОБАВЛЕНО: Информация о сигнатурном сканировании
+        if self.signature_info:
+            self._log(f"🔍 Сигнатурное сканирование: {'Совпадение найдено' if self.signature_info.get('has_match') else 'Нет совпадений'}")
 
     # ==================== PUBLIC ACCESSORS ====================
 
@@ -778,6 +928,10 @@ class AnalysisEngine:
 
     def get_osint_data(self) -> Dict:
         return self.osint_data
+    
+    def get_signature_info(self) -> Dict:
+        """Получение информации о сигнатурном сканировании"""
+        return self.signature_info
 
     def get_risk_score(self) -> int:
         return self.risk_score
@@ -827,6 +981,7 @@ class AnalysisEngine:
     def save_consolidated_report(self, filename_prefix: str) -> Path:
         """
         Сохранение консолидированного отчета о анализе в формате JSON.
+        ✅ ОБНОВЛЕНО: Включение информации о сигнатурном сканировании
         """
         report_data = {
             "manifest_info": self.manifest_info,
@@ -835,6 +990,7 @@ class AnalysisEngine:
             "network_indicators": dict(self.network_indicators),
             "osint_data": self.osint_data,
             "native_data": self.native_data,
+            "signature_info": self.signature_info,
             "risk_score": self.risk_score,
             "statistics": self.statistics,
             "generated_at": datetime.now().isoformat()

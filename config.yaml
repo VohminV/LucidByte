@@ -1,93 +1,49 @@
-application:
-  name: LucidByte
-  version: 3.0.0
-  mode: android_malware_analysis
-  theme: dark
+# ===========================================
+# LucidByte - Конфигурационный Файл
+# ===========================================
 
-language_model:
-  provider: ollama
-  model_name: qwen2.5-coder:7b
-  base_url: http://localhost:11434
-  max_tokens: 4096
-  temperature: 0.1
+application:
+  name: "LucidByte"
+  version: "1.0.0"
+  theme: "dark"
 
 analysis:
-  decompiler_path: jadx
-  temp_directory: temp
-  max_file_size_mb: 100
-  enable_deep_scan: true
-  enable_dynamic_analysis: true
-  enable_native_analysis: true
+  decompiler_path: ""
+  temp_directory: "temp"
+  enable_ghidra: true
+  enable_signature_scan: true
 
 security:
-  risk_threshold: 5
   suspicious_permissions:
-    - SEND_SMS
-    - READ_SMS
-    - RECEIVE_SMS
-    - READ_CONTACTS
-    - WRITE_CONTACTS
-    - ACCESS_FINE_LOCATION
-    - ACCESS_COARSE_LOCATION
-    - READ_CALL_LOG
-    - WRITE_CALL_LOG
-    - PROCESS_OUTGOING_CALLS
-    - RECEIVE_BOOT_COMPLETED
-    - SYSTEM_ALERT_WINDOW
-    - BIND_ACCESSIBILITY_SERVICE
-    - DEVICE_POWER
-    - WAKE_LOCK
-    - READ_EXTERNAL_STORAGE
-    - WRITE_EXTERNAL_STORAGE
-    - CAMERA
-    - RECORD_AUDIO
-    - GET_ACCOUNTS
-    - USE_CREDENTIALS
+    - "READ_SMS"
+    - "SEND_SMS"
+    - "READ_CONTACTS"
+    - "ACCESS_FINE_LOCATION"
   dangerous_api_calls:
-    - Runtime.exec
-    - ProcessBuilder
-    - HttpURLConnection
-    - SSLSocket
-    - Cipher.getInstance
-    - SecretKeySpec
-    - SmsManager.getDefault
-    - TelephonyManager
-    - AudioManager
-    - Camera.open
-    - LocationManager
-    - AccountManager
-    - ClipboardManager
-    - WifiManager
-    - BluetoothAdapter
-    - DexClassLoader
-    - PathClassLoader
+    - "Runtime.exec"
+    - "DexClassLoader"
+    - "ProcessBuilder"
+  risk_threshold: 70
 
-sandbox:
-  emulator_path: emulator
-  emulator_port: 5554
-  frida_server_port: 27042
-  mitmproxy_port: 8080
-  capture_timeout_seconds: 60
+# ✅  Только открытые источники сигнатур
+signatures:
+  sources:
+    malwarebazaar: "https://bazaar.abuse.ch/export/"
+    yara_rules:
+      - "https://raw.githubusercontent.com/Yara-Rules/rules/master/"
+      - "https://raw.githubusercontent.com/elastic/protections-artifacts/main/yara-rules/"
+      - "https://raw.githubusercontent.com/Neo23x0/signature-base/master/yara/"
+  
+  update_interval_hours: 24
+  fuzzy_hash_threshold: 90
+  enable_sha256_scan: true
+  enable_yara_scan: true
+  enable_ssdeep_scan: true
+  virustotal_api_key: ""
+  
+  http_proxy: ""
+  https_proxy: ""
 
-native_analysis:
-  enable_ghidra: true
-  ghidra_path: ghidra
-  enable_capstone: true
-  architectures:
-    - arm
-    - arm64
-    - x86
-    - x86_64
-
-deobfuscation:
-  enable_auto_rename: true
-  enable_string_decryption: true
-  enable_flow_simplification: true
-  max_iterations: 5
-
-interface:
-  width: 1920
-  height: 1080
-  font_size: 12
-  show_line_numbers: true
-  enable_syntax_highlighting: true
+language_model:
+  base_url: "http://localhost:11434"
+  model_name: "llama2"
