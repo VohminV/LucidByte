@@ -1,0 +1,2 @@
+# Placeholder - добавьте ключи API для загрузки хешей
+# Источники: MalwareBazaar, VirusTotal

@@ -21,7 +21,7 @@ class LanguageModelManager:
         }
 
         try:
-            response = requests.post(endpoint, json=payload, timeout=120)
+            response = requests.post(endpoint, json=payload, timeout=10800)
             response.raise_for_status()
             result_data = response.json()
             return result_data.get("response", "")

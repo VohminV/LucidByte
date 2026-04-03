@@ -6,8 +6,9 @@ import json
 import re
 import zipfile
 import platform
+import math
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Set
 from collections import defaultdict
 from datetime import datetime
 
@@ -24,22 +25,121 @@ try:
 except ImportError:
     ELF_TOOLS_AVAILABLE = False
 
-# ✅ ИМПОРТ СИГНАТУРНЫХ МОДУЛЕЙ
+# ИМПОРТ СИГНАТУРНЫХ МОДУЛЕЙ
 try:
     from .signature_manager import SignatureManager
     from .signature_scanner import SignatureScanner, SignatureScanResult
     SIGNATURE_MODULES_AVAILABLE = True
 except ImportError as e:
     SIGNATURE_MODULES_AVAILABLE = False
-    # Логирование ошибки импорта для отладки
     import logging
     logging.warning(f"Не удалось импортировать сигнатурные модули: {e}. Сигнатурный анализ отключен.")
 
+
+class WhitelistFilter:
+    """Фильтр ложных срабатываний для легитимных компонентов"""
+    
+    LEGITIMATE_PACKAGES = {
+        'com.google.',
+        'androidx.',
+        'org.jetbrains.',
+        'com.facebook.',
+        'com.amazonaws.',
+        'io.firebase.',
+        'com.crashlytics.',
+        'com.microsoft.',
+        'com.squareup.okhttp',
+        'com.google.gson',
+        'com.android.volley'
+    }
+
+    LEGITIMATE_CLASSES = {
+        'Gson', 'OkHttpClient', 'Firebase', 'Crashlytics', 'Fabric',
+        'AdMob', 'PlayServices', 'SupportFragment', 'AppCompatActivity'
+    }
+
+    @classmethod
+    def is_legitimate_package(cls, package_name: str) -> bool:
+        if not package_name:
+            return False
+        for prefix in cls.LEGITIMATE_PACKAGES:
+            if package_name.startswith(prefix):
+                return True
+        return False
+
+    @classmethod
+    def is_legitimate_class(cls, class_name: str) -> bool:
+        for legit in cls.LEGITIMATE_CLASSES:
+            if legit in class_name:
+                return True
+        return False
+
+
+class CertificateAnalyzer:
+    """Анализ сертификатов подписи Android APK"""
+    
+    def __init__(self, apk_path: Path):
+        self.apk_path = apk_path
+        self.cert_info = {}
+
+    def analyze(self) -> Dict:
+        try:
+            with zipfile.ZipFile(self.apk_path, 'r') as zip_ref:
+                meta_inf = [f for f in zip_ref.namelist() 
+                           if f.startswith('META-INF/') and 
+                           (f.endswith('.RSA') or f.endswith('.DSA') or f.endswith('.EC'))]
+                if not meta_inf:
+                    self.cert_info['signed'] = False
+                    self.cert_info['risk'] = 'High'
+                    self.cert_info['reason'] = 'Отсутствие Подписи'
+                    return self.cert_info
+                
+                self.cert_info['signed'] = True
+                cert_name = meta_inf[0].split('/')[-1]
+                if 'debug' in cert_name.lower() or 'androiddebugkey' in cert_name.lower():
+                    self.cert_info['debug_cert'] = True
+                    self.cert_info['risk'] = 'Medium'
+                    self.cert_info['reason'] = 'Отладочный Сертификат'
+                else:
+                    self.cert_info['debug_cert'] = False
+                    self.cert_info['risk'] = 'Low'
+                    self.cert_info['reason'] = 'Стандартный Сертификат'
+                    
+        except Exception as e:
+            self.cert_info['error'] = str(e)
+            self.cert_info['risk'] = 'Unknown'
+        
+        return self.cert_info
+
+
+class EntropyCalculator:
+    """Вычисление энтропии для обнаружения упаковки и шифрования"""
+    
+    @staticmethod
+    def calculate(data: bytes) -> float:
+        if not data:
+            return 0.0
+        
+        frequency = defaultdict(int)
+        for byte in data:
+            frequency[byte] += 1
+        
+        entropy = 0.0
+        data_len = len(data)
+        for count in frequency.values():
+            if count > 0:
+                p = count / data_len
+                entropy -= p * math.log2(p)
+        
+        return entropy
+
+    @staticmethod
+    def is_packed(entropy: float) -> bool:
+        return entropy > 7.0
+
+
 class AnalysisEngine:
-    """
-    Ядро статического анализа файлов APK (Издание PyGhidra)
-    Архитектура Готовая к Производству - Python 3 Native
-    """
+    """Ядро статического анализа файлов"""
     
     SYSTEM_LIBS = {
         'libc++_shared.so', 'libc++.so', 'liblog.so', 'libm.so', 'libz.so',
@@ -47,7 +147,7 @@ class AnalysisEngine:
         'libGLESv1_CM.so', 'libGLESv2.so', 'libGLESv3.so', 'libjnigraphics.so',
         'libandroid.so', 'libOpenSLES.so', 'libmediandk.so', 'libvulkan.so'
     }
-
+    
     SKIP_DIRS = {
         'res/drawable', 'res/layout', 'res/font', 'res/anim', 'res/color', 'res/mipmap'
     }
@@ -64,6 +164,14 @@ class AnalysisEngine:
         'loadLibrary', 'System.load', 'System.loadLibrary',
         'Runtime.exec', 'ProcessBuilder'
     ]
+
+    BEHAVIOR_PATTERNS = {
+        'sms_intercept': ['SmsManager', 'receiveSms', 'READ_SMS'],
+        'overlay_attack': ['SYSTEM_ALERT_WINDOW', 'TYPE_PHONE', 'FLAG_LAYOUT_NO_LIMITS'],
+        'accessibility_abuse': ['AccessibilityService', 'onAccessibilityEvent', 'BIND_ACCESSIBILITY_SERVICE'],
+        'banking_trojan': ['keyguard', 'lockscreen', 'overlay', 'bank', 'payment'],
+        'reflection_obfuscation': ['Class.forName', 'Method.invoke', 'getDeclaredMethod']
+    }
 
     def __init__(self, temp_dir: str = "temp"):
         self.temp_dir = Path(temp_dir)
@@ -83,15 +191,18 @@ class AnalysisEngine:
         self.threats: List[Dict] = []
         self.osint_data: Dict = {}
         self.signature_info: Dict = {}
+        self.certificate_info: Dict = {}
+        self.entropy_info: Dict = {}
         self.statistics: Dict = {}
         self.risk_score: int = 0
+        self.call_graph: Dict[str, List[str]] = {}
 
         self.progress_callback: Optional[Callable] = None
         self.log_callback: Optional[Callable] = None
         self.use_ghidra: bool = True
         self.ghidra_initialized: bool = False
         
-        # ✅ ИНИЦИАЛИЗАЦИЯ СИГНАТУРНЫХ МОДУЛЕЙ
+        # ИНИЦИАЛИЗАЦИЯ СИГНАТУРНЫХ МОДУЛЕЙ
         self.signature_manager: Optional[SignatureManager] = None
         self.signature_scanner: Optional[SignatureScanner] = None
         self.signature_scan_result: Optional[SignatureScanResult] = None
@@ -108,9 +219,9 @@ class AnalysisEngine:
 
     def enable_ghidra(self, enabled: bool = True):
         self.use_ghidra = enabled
-        self._log(f"🔧 Ghidra: {'включён' if enabled else 'отключён'}")
+        self._log(f"🔧 PYGHIDRA: {'включён' if enabled else 'отключён'}")
         if enabled and not PYGHIDRA_AVAILABLE:
-            self._log("⚠ PyGhidra не установлен! Выполните: pip install pyghidra")
+            self._log("⚠ PYGHIDRA не установлен! Выполните: pip install pyghidra")
 
     def _log(self, message: str):
         if self.log_callback:
@@ -119,8 +230,6 @@ class AnalysisEngine:
     def _progress(self, value: int, message: str):
         if self.progress_callback:
             self.progress_callback(value, message)
-
-    # ==================== ARCHITECTURE DETECTION ====================
 
     def _get_arch_from_path(self, path: Path) -> str:
         parts = path.as_posix().split("/")
@@ -155,18 +264,16 @@ class AnalysisEngine:
     def _get_arch(self, path: Path) -> str:
         return self._get_arch_from_elf(path)
 
-    # ==================== MAIN ANALYSIS PIPELINE ====================
-
     def analyze_apk(self, apk_path: str) -> bool:
         try:
             self.apk_path = Path(apk_path)
             self._log("=" * 70)
-            self._log("🔍 LUCIDBYTE ANALYSIS ENGINE (Издание PyGhidra)")
+            self._log("🔍 LucidByte АНАЛИТИЧЕСКИЙ ДВИЖОК")
             self._log("=" * 70)
             self._log(f"📁 Файл: {apk_path}")
             self._log(f"📊 Размер: {os.path.getsize(apk_path) / 1024 / 1024:.2f} Мегабайт")
-            self._log(f"🔧 PyGhidra: {'доступен' if PYGHIDRA_AVAILABLE else 'НЕ доступен'}")
-            self._log(f"🔧 Signature Scanner: {'доступен' if SIGNATURE_MODULES_AVAILABLE else 'НЕ доступен'}")
+            self._log(f"🔧 PYGHIDRA: {'доступен' if PYGHIDRA_AVAILABLE else 'НЕ доступен'}")
+            self._log(f"🔧 Сканер Сигнатур: {'доступен' if SIGNATURE_MODULES_AVAILABLE else 'НЕ доступен'}")
             self._log("=" * 70)
 
             if self.decompiled_dir.exists():
@@ -175,11 +282,10 @@ class AnalysisEngine:
             self.ghidra_input_dir.mkdir(parents=True, exist_ok=True)
             self.ghidra_report_dir.mkdir(parents=True, exist_ok=True)
 
-            # ✅ СИГНАТУРНАЯ ПРОВЕРКА НА ПЕРВОМ ЭТАПЕ (5%)
+            # СИГНАТУРНАЯ ПРОВЕРКА НА ПЕРВОМ ЭТАПЕ (5%)
             self._progress(5, "Сигнатурная проверка...")
             signature_threat_detected = self._perform_signature_scan()
             
-            # Если найдена критическая угроза по сигнатуре - прекращаем анализ
             if signature_threat_detected:
                 self._log("⚠️ Обнаружена известная угроза по сигнатуре. Анализ прекращён.")
                 self._progress(100, "Анализ завершен (сигнатурное совпадение)")
@@ -200,15 +306,22 @@ class AnalysisEngine:
             self._progress(50, "Анализ DEX (jadx)...")
             self._analyze_dex_fast()
 
+            self._progress(60, "Анализ энтропии и упаковки...")
+            self._analyze_entropy()
+
+            self._progress(65, "Анализ сертификата...")
+            self._analyze_certificate()
+
             if self.use_ghidra:
                 if not PYGHIDRA_AVAILABLE:
-                    self._log("⚠ PyGhidra не установлен, пропускаем анализ native библиотек")
+                    self._log("⚠ PYGHIDRA не установлен, пропускаем анализ native библиотек")
                 else:
-                    self._progress(70, "Анализ native библиотек (PyGhidra)...")
+                    self._progress(70, "Анализ native библиотек (PYGHIDRA)...")
                     self._analyze_native_pyghidra()
 
             self._progress(90, "Расчет риска и сбор результатов...")
             self._correlate_threats()
+            self._build_call_graph()
             self._calculate_risk_score()
 
             self._progress(100, "Анализ завершен")
@@ -224,20 +337,12 @@ class AnalysisEngine:
             self._log(f"📋 Трассировка:\n{traceback.format_exc()}")
             return False
 
-    # ==================== SIGNATURE SCANNING ====================
-    
     def _perform_signature_scan(self) -> bool:
-        """
-        Выполнение сигнатурного сканирования
-        Returns:
-            True если найдено критическое совпадение, False иначе
-        """
         if not SIGNATURE_MODULES_AVAILABLE or not self.signature_scanner:
             self._log("⚠ Сигнатурные модули недоступны, пропускаем проверку")
             return False
         
         try:
-            # Обновление базы сигнатур (если необходимо)
             if self.signature_manager and self.signature_manager.needs_update():
                 self._log("🔄 Обновление базы сигнатур...")
                 try:
@@ -248,21 +353,15 @@ class AnalysisEngine:
                     self._log(f"⚠ Ошибка обновления сигнатур: {e}")
                     self._log("⚠ Используем последнюю локальную копию базы")
             
-            # Сканирование файла
             self._log(f"🔍 Сигнатурное сканирование: {self.apk_path.name}")
             self.signature_scan_result = self.signature_scanner.scan(str(self.apk_path))
             
-            # Обработка результатов
             if self.signature_scan_result.has_match:
                 self._log(f"⚠️ НАЙДЕНО СОВПАДЕНИЕ: {self.signature_scanner.get_scan_summary(self.signature_scan_result)}")
-                
-                # Добавление угроз в список
                 self._add_signature_threats()
                 
-                # Возвращаем True для критических совпадений
                 if self.signature_scan_result.risk_level == "Critical":
                     return True
-            
             else:
                 self._log("✅ Сигнатурных совпадений не найдено")
             
@@ -271,13 +370,11 @@ class AnalysisEngine:
         except Exception as e:
             self._log(f"⚠ Ошибка сигнатурного сканирования: {e}")
             return False
-    
+
     def _add_signature_threats(self):
-        """Добавление угроз из результатов сигнатурного сканирования"""
         if not self.signature_scan_result:
             return
         
-        # Хеш-совпадение (критическое)
         if self.signature_scan_result.hash_match:
             self.threats.append({
                 'source': 'signature_hash',
@@ -289,19 +386,18 @@ class AnalysisEngine:
                 'family': self.signature_scan_result.hash_match.get('family', 'Unknown')
             })
         
-        # YARA совпадения
         for yara_match in self.signature_scan_result.yara_matches:
             self.threats.append({
                 'source': 'signature_yara',
                 'pattern': yara_match['rule_name'],
                 'risk': 'High',
-                'desc': f"YARA правило: {yara_match['threat_name']}",
+                'desc': f"Правило YARA: {yara_match['threat_name']}",
                 'category': 'Signature_YARA',
                 'confidence': yara_match['confidence'],
                 'family': yara_match.get('family', 'Unknown')
             })
         
-        # Fuzzy hash совпадения
+        # Нечёткий хеш
         if self.signature_scan_result.fuzzy_match:
             self.threats.append({
                 'source': 'signature_fuzzy',
@@ -313,7 +409,6 @@ class AnalysisEngine:
                 'family': self.signature_scan_result.fuzzy_match.get('family', 'Unknown')
             })
         
-        # Сохранение информации о сигнатурном сканировании
         self.signature_info = {
             'scanned': True,
             'has_match': self.signature_scan_result.has_match,
@@ -324,10 +419,8 @@ class AnalysisEngine:
             'scan_errors': self.signature_scan_result.scan_errors
         }
 
-    # ==================== APK EXTRACTION ====================
-
     def _extract_apk_structure(self):
-        self._log("📦 Распаковка APK...")
+        self._log("📦 Распаковка Android APK...")
 
         with zipfile.ZipFile(self.apk_path, 'r') as zip_ref:
             for member in zip_ref.namelist():
@@ -367,8 +460,6 @@ class AnalysisEngine:
             'assets': len(list((self.decompiled_dir / 'assets').rglob('*'))) if (self.decompiled_dir / 'assets').exists() else 0,
         }
 
-    # ==================== MANIFEST ANALYSIS ====================
-
     def _parse_manifest_fast(self):
         manifest_path = self.decompiled_dir / "AndroidManifest.xml"
         if not manifest_path.exists():
@@ -381,7 +472,8 @@ class AnalysisEngine:
                 self.manifest_data = content
             self._parse_permissions_fast(content)
             self._parse_app_info_fast(content)
-            self._log(f"✓ Манифест: {len(self.permissions)} разрешений, пакет: {self.manifest_info.get('package', 'N/A')}")
+            self._parse_components_fast(content)
+            self._log(f"✓ Манифест: {len(self.permissions)} разрешений, пакет: {self.manifest_info.get('package', 'Не Доступно')}")
         except Exception as exception:
             self._log(f"⚠ Ошибка парсинга манифеста: {exception}")
 
@@ -398,7 +490,11 @@ class AnalysisEngine:
 
         self.permissions = []
         for permission in sorted(permissions):
-            risk = self._assess_permission_risk(permission)
+            if WhitelistFilter.is_legitimate_package(self.manifest_info.get('package', '')):
+                risk = 'Low'
+            else:
+                risk = self._assess_permission_risk(permission)
+            
             category = self._get_permission_category(permission)
             self.permissions.append({"name": permission, "risk": risk, "category": category})
             if risk == "Critical":
@@ -415,12 +511,31 @@ class AnalysisEngine:
             self.manifest_info['version'] = match.group(1)
         if match := re.search(r'targetSdkVersion="(\d+)"', content):
             self.manifest_info['target_sdk'] = int(match.group(1))
+        
+        if 'android:debuggable="true"' in content:
+            self.manifest_info['debuggable'] = True
+            self.threats.append({
+                "source": "manifest", "pattern": "debuggable=true", "risk": "High",
+                "desc": "Приложение отлаживаемое", "category": "Debug"
+            })
+        else:
+            self.manifest_info['debuggable'] = False
+
+    def _parse_components_fast(self, content: str):
         self.manifest_info['components'] = {
             'activities': len(re.findall(r'<activity[^>]*>', content)),
             'services': len(re.findall(r'<service[^>]*>', content)),
             'receivers': len(re.findall(r'<receiver[^>]*>', content)),
             'providers': len(re.findall(r'<provider[^>]*>', content)),
         }
+        exported = re.findall(r'<(activity|service|receiver|provider)[^>]*android:exported="true"', content)
+        if len(exported) > 0:
+            self.manifest_info['exported_components'] = len(exported)
+            if len(exported) > 5:
+                self.threats.append({
+                    "source": "manifest", "pattern": "exported_components", "risk": "Medium",
+                    "desc": f"Много экспортированных компонентов: {len(exported)}", "category": "Export"
+                })
 
     def _assess_permission_risk(self, permission: str) -> str:
         dangerous = {
@@ -454,8 +569,6 @@ class AnalysisEngine:
                     return category
         return 'OTHER'
 
-    # ==================== OSINT RESOURCES ====================
-
     def _extract_osint_resources(self):
         self._log("🔍 Анализ ресурсов...")
         strings_xml = self.decompiled_dir / "res" / "values" / "strings.xml"
@@ -470,7 +583,7 @@ class AnalysisEngine:
         arsc_file = self.decompiled_dir / "resources.arsc"
         if arsc_file.exists():
             self._extract_strings_from_arsc(arsc_file)
-        self._log(f"✓ OSINT: {len(self.osint_data.get('urls', []))} URL, {len(self.osint_data.get('api_keys', []))} Ключи API")
+        self._log(f"✓ OSINT: {len(self.osint_data.get('urls', []))} URL, {len(self.osint_data.get('api_keys', []))} API Ключей")
 
     def _parse_strings_xml(self, filepath: Path):
         try:
@@ -593,17 +706,15 @@ class AnalysisEngine:
         total_urls = sum(len(value_list) for value_list in self.network_indicators.values())
         self._log(f"✓ Найдено сетевых индикаторов: {total_urls}")
 
-    # ==================== DEX ANALYSIS VIA JADX ====================
-
     def _analyze_dex_fast(self):
         jadx_cmd = self._find_jadx()
         if not jadx_cmd:
-            self._log("⚠ jadx не найден, пропускаем DEX анализ")
+            self._log("⚠ jadx не найден, пропускаем jadx анализ")
             return
         output_dir = str(self.decompiled_dir.absolute())
         input_file = str(self.apk_path.absolute())
-        self._log(f"📥 JADX вход: {input_file}")
-        self._log(f"📤 JADX выход: {output_dir}")
+        self._log(f"📥 jadx вход: {input_file}")
+        self._log(f"📤 jadx выход: {output_dir}")
 
         is_windows = platform.system() == "Windows"
         is_batch = jadx_cmd.endswith(('.bat', '.cmd'))
@@ -614,18 +725,18 @@ class AnalysisEngine:
             environment['JAVA_OPTS'] = '-Xmx4G'
             try:
                 subprocess.run(command, shell=True, capture_output=True, text=True,
-                                timeout=900, encoding='utf-8', errors='ignore', env=environment)
+                              timeout=900, encoding='utf-8', errors='ignore', env=environment)
             except Exception as exception:
                 self._log(f"✗ Ошибка jadx: {exception}")
                 return
         else:
             command = [jadx_cmd, "-d", output_dir, "-j", "4", "--no-replace-consts",
-                        "--show-bad-code", "--no-inline-methods", input_file]
+                      "--show-bad-code", "--no-inline-methods", input_file]
             environment = os.environ.copy()
             environment['JAVA_OPTS'] = '-Xmx4G'
             try:
                 subprocess.run(command, capture_output=True, text=True,
-                                timeout=900, encoding='utf-8', errors='ignore', env=environment)
+                              timeout=900, encoding='utf-8', errors='ignore', env=environment)
             except Exception as exception:
                 self._log(f"✗ Ошибка jadx: {exception}")
                 return
@@ -653,12 +764,11 @@ class AnalysisEngine:
         return None
 
     def _scan_java_for_threats(self, java_files: List[Path]):
-        """Основной метод сканирования Java файлов на угрозы"""
         threat_patterns = [
             {"pattern": "Runtime.getRuntime().exec", "risk": "Critical", "desc": "Выполнение системных команд", "category": "Code Execution"},
             {"pattern": "ProcessBuilder", "risk": "Critical", "desc": "Создание процессов", "category": "Code Execution"},
             {"pattern": "DexClassLoader", "risk": "High", "desc": "Динамическая загрузка кода", "category": "Code Injection"},
-            {"pattern": "getDeviceId", "risk": "High", "desc": "Сбор идентификаторов устройства", "category": "Data Collection"},
+            {"pattern": "getDeviceId", "risk": "High", "desc": "Сбор Device ID", "category": "Data Collection"},
             {"pattern": "SmsManager", "risk": "Critical", "desc": "Отправка/чтение SMS", "category": "SMS Control"},
             {"pattern": "AccessibilityService", "risk": "Critical", "desc": "Служба доступности", "category": "Security"},
             {"pattern": "Cipher", "risk": "Medium", "desc": "Шифрование данных", "category": "Cryptography"},
@@ -672,14 +782,30 @@ class AnalysisEngine:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as file_handle:
                     content = file_handle.read()
 
+                file_content = str(file_path)
+                if WhitelistFilter.is_legitimate_package(file_content):
+                    continue
+
                 for threat in threat_patterns:
                     if threat["pattern"] in content:
                         relative_path = str(file_path.relative_to(self.decompiled_dir))
+                        is_obfuscated = "Class.forName" in content or "Method.invoke" in content
+                        
                         self.threats.append({
                             "file": relative_path, "pattern": threat["pattern"],
                             "risk": threat["risk"], "desc": threat["desc"],
-                            "category": threat["category"]
+                            "category": threat["category"], "obfuscated": is_obfuscated
                         })
+                        
+                for behavior, patterns in self.BEHAVIOR_PATTERNS.items():
+                    for pattern in patterns:
+                        if pattern in content:
+                            self.threats.append({
+                                "file": str(file_path.relative_to(self.decompiled_dir)),
+                                "pattern": pattern, "risk": "High",
+                                "desc": f"Паттерн поведения: {behavior}",
+                                "category": f"Behavior_{behavior}"
+                            })
             except Exception:
                 continue
 
@@ -693,31 +819,29 @@ class AnalysisEngine:
         self.threats = unique
         self._log(f"✓ Найдено уникальных угроз: {len(self.threats):,}")
 
-    # ==================== NATIVE LIBS ANALYSIS (PYGHIDRA) ====================
-
     def _initialize_ghidra_environment(self):
         if self.ghidra_initialized:
             return
         if not PYGHIDRA_AVAILABLE:
-            raise ImportError("PyGhidra не установлен")
+            raise ImportError("PYGHIDRA не установлен")
         if not os.environ.get('JAVA_HOME'):
             self._log("⚠ Переменная окружения JAVA_HOME не установлена.")
-        self._log("🔧 Инициализация PyGhidra...")
+        self._log("🔧 Инициализация PYGHIDRA...")
         try:
             if pyghidra.started():
-                self._log("✓ Виртуальная Машина Java уже запущена")
+                self._log("✓ JVM уже запущена")
                 self.ghidra_initialized = True
                 return
             pyghidra.start()
             self.ghidra_initialized = True
-            self._log("✓ PyGhidra успешно инициализирован")
+            self._log("✓ PYGHIDRA успешно инициализирован")
         except Exception as exception:
-            self._log(f"✗ Ошибка инициализации PyGhidra: {exception}")
+            self._log(f"✗ Ошибка инициализации PYGHIDRA: {exception}")
             raise
 
     def _analyze_native_pyghidra(self):
         if not PYGHIDRA_AVAILABLE:
-            self._log("⚠ PyGhidra не установлен")
+            self._log("⚠ PYGHIDRA не установлен")
             return
 
         so_files = list(self.decompiled_dir.rglob("*.so"))
@@ -788,7 +912,7 @@ class AnalysisEngine:
                     "file": f"native:{lib_name}",
                     "pattern": jni["name"],
                     "risk": "Medium",
-                    "desc": f"JNI entry point: {jni['name']}",
+                    "desc": f"JNI точка входа: {jni['name']}",
                     "category": "Native_JNI"
                 })
 
@@ -800,13 +924,70 @@ class AnalysisEngine:
                     "desc": f"Подозрительная функция: {susp['function']}",
                     "category": "Native_Suspicious"
                 })
+            
+            for anti_debug in data.get("anti_debug", []):
+                self.threats.append({
+                    "file": f"native:{lib_name}",
+                    "pattern": anti_debug["indicator"],
+                    "risk": "High",
+                    "desc": f"Анти-отладка: {anti_debug['pattern']}",
+                    "category": "Native_AntiDebug"
+                })
 
             self.native_data[lib_name] = data
             self._log(f"✓ {lib_name}: {len(data.get('imports', []))} imports, {len(data.get('jni_functions', []))} JNI")
         except Exception as exception:
             self._log(f"⚠ Ошибка парсинга {json_path}: {exception}")
 
-    # ==================== THREAT CORRELATION & RISK SCORE ====================
+    def _analyze_entropy(self):
+        high_entropy_files = []
+        for filepath in self.decompiled_dir.rglob('*'):
+            if filepath.is_file() and filepath.suffix in ['.dex', '.so', '.bin']:
+                try:
+                    with open(filepath, 'rb') as f:
+                        data = f.read(1024 * 1024)
+                    entropy = EntropyCalculator.calculate(data)
+                    if EntropyCalculator.is_packed(entropy):
+                        high_entropy_files.append({
+                            'file': str(filepath.relative_to(self.decompiled_dir)),
+                            'entropy': round(entropy, 2)
+                        })
+                except Exception:
+                    pass
+        
+        self.entropy_info['high_entropy_files'] = high_entropy_files
+        if len(high_entropy_files) > 0:
+            self.threats.append({
+                'source': 'entropy',
+                'pattern': 'high_entropy',
+                'risk': 'Medium',
+                'desc': f"Обнаружено {len(high_entropy_files)} файлов с высокой энтропией (возможная упаковка)",
+                'category': 'Packing'
+            })
+
+    def _analyze_certificate(self):
+        cert_analyzer = CertificateAnalyzer(self.apk_path)
+        self.certificate_info = cert_analyzer.analyze()
+        
+        if self.certificate_info.get('risk') == 'High':
+            self.threats.append({
+                'source': 'certificate',
+                'pattern': 'unsigned',
+                'risk': 'High',
+                'desc': 'Приложение не подписано',
+                'category': 'Certificate'
+            })
+        elif self.certificate_info.get('debug_cert'):
+            self.threats.append({
+                'source': 'certificate',
+                'pattern': 'debug_certificate',
+                'risk': 'Medium',
+                'desc': 'Использован отладочный сертификат',
+                'category': 'Certificate'
+            })
+
+    def _build_call_graph(self):
+        self.call_graph = self.get_call_graph_data()
 
     def _correlate_threats(self):
         for url in self.network_indicators.get('url', []):
@@ -830,22 +1011,16 @@ class AnalysisEngine:
         self.threats = unique
 
     def _calculate_risk_score(self):
-        """
-        Расчет итоговой оценки риска
-        ✅ ОБНОВЛЕНО: Учёт результатов сигнатурной проверки
-        """
         score = 0
         
-        # ✅ КРИТИЧЕСКОЕ ПРАВИЛО: Сигнатурное совпадение = максимальный риск
         if self.signature_info.get('has_match', False):
             if self.signature_info.get('risk_level') == 'Critical':
                 self.risk_score = 100
                 self._log("🎯 Оценка Риска: 100/100 (сигнатурное совпадение)")
                 return
             elif self.signature_info.get('risk_level') == 'High':
-                score += 50  # Значительное увеличение для YARA совпадений
+                score += 50
         
-        # Стандартный расчет рисков
         score += sum(1 for threat in self.threats if threat["risk"] == "Critical") * 15
         score += sum(1 for threat in self.threats if threat["risk"] == "High") * 8
         score += sum(1 for threat in self.threats if threat["risk"] == "Medium") * 3
@@ -879,13 +1054,13 @@ class AnalysisEngine:
         self._log(f"🟢 Low: {risk_counts.get('Low', 0)}")
         self._log(f"🔐 Разрешений: {len(self.permissions)}")
         self._log(f"🌐 URL индикаторов: {len(self.network_indicators.get('url', []))}")
-        self._log(f"📦 Пакет: {self.manifest_info.get('package', 'N/A')}")
+        self._log(f"📦 Пакет: {self.manifest_info.get('package', 'Не Доступно')}")
         
-        # ✅ ДОБАВЛЕНО: Информация о сигнатурном сканировании
         if self.signature_info:
             self._log(f"🔍 Сигнатурное сканирование: {'Совпадение найдено' if self.signature_info.get('has_match') else 'Нет совпадений'}")
-
-    # ==================== PUBLIC ACCESSORS ====================
+        
+        if self.certificate_info:
+            self._log(f"🔒 Сертификат: {self.certificate_info.get('reason', 'Неизвестно')}")
 
     def get_decompiled_files(self) -> List[Path]:
         if not self.decompiled_dir.exists():
@@ -928,76 +1103,120 @@ class AnalysisEngine:
 
     def get_osint_data(self) -> Dict:
         return self.osint_data
-    
+
     def get_signature_info(self) -> Dict:
-        """Получение информации о сигнатурном сканировании"""
         return self.signature_info
+
+    def get_certificate_info(self) -> Dict:
+        return self.certificate_info
+
+    def get_entropy_info(self) -> Dict:
+        return self.entropy_info
 
     def get_risk_score(self) -> int:
         return self.risk_score
 
-    # ==================== NEW METHODS FOR WORKER ====================
-
     def get_call_graph_data(self) -> Dict[str, List[str]]:
-        """
-        Построение упрощенного графа зависимостей классов на основе декомпилированных Java файлов.
-        Возвращает словарь {ИмяКласса: [СписокИспользуемыхКлассов]}
-        """
         graph_data = defaultdict(list)
         java_files = list(self.decompiled_dir.rglob("*.java"))
         
-        # Ограничим количество файлов для производительности
         if len(java_files) > 200:
             java_files = java_files[:200]
             
         known_classes = set()
-        # Сначала соберем все известные классы
         for file_path in java_files:
             class_name = file_path.stem
             known_classes.add(class_name)
             
-        # Теперь найдем связи
         for file_path in java_files:
             source_class = file_path.stem
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
                 
-                # Ищем упоминания других классов (упрощенно по именам)
                 for target_class in known_classes:
                     if target_class != source_class and target_class in content:
-                        # Проверка на слово целиком, чтобы избежать частичных совпадений
                         if re.search(r'\b' + re.escape(target_class) + r'\b', content):
                             if target_class not in graph_data[source_class]:
                                 graph_data[source_class].append(target_class)
-                                # Ограничим количество связей для одного узла
                                 if len(graph_data[source_class]) >= 10:
                                     break
             except Exception:
                 continue
-                
+            
         return dict(graph_data)
 
     def save_consolidated_report(self, filename_prefix: str) -> Path:
-        """
-        Сохранение консолидированного отчета о анализе в формате JSON.
-        ✅ ОБНОВЛЕНО: Включение информации о сигнатурном сканировании
-        """
         report_data = {
-            "manifest_info": self.manifest_info,
-            "permissions": self.permissions,
-            "threats": self.threats,
-            "network_indicators": dict(self.network_indicators),
-            "osint_data": self.osint_data,
-            "native_data": self.native_data,
-            "signature_info": self.signature_info,
-            "risk_score": self.risk_score,
-            "statistics": self.statistics,
-            "generated_at": datetime.now().isoformat()
+            "report_metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "analyzer_version": "1.0.0",
+                "analyzer_name": "LucidByte Analysis Engine"
+            },
+            "summary": {
+                "file_name": self.apk_path.name if self.apk_path else "Unknown",
+                "file_hash": self.signature_info.get('hash_match', {}).get('value', 'Not Scanned'),
+                "risk_score": self.risk_score,
+                "verdict": "Malicious" if self.risk_score >= 70 else "Suspicious" if self.risk_score >= 30 else "Safe"
+            },
+            "application_info": {
+                "package_name": self.manifest_info.get('package', 'N/A'),
+                "version": self.manifest_info.get('version', 'N/A'),
+                "target_sdk": self.manifest_info.get('target_sdk', 'N/A'),
+                "debuggable": self.manifest_info.get('debuggable', False),
+                "components": self.manifest_info.get('components', {})
+            },
+            "permissions_analysis": {
+                "total_count": len(self.permissions),
+                "dangerous_permissions": self.get_dangerous_permissions(),
+                "all_permissions": self.permissions
+            },
+            "threats_detected": {
+                "total_count": len(self.threats),
+                "critical_count": len(self.get_critical_threats()),
+                "threats_by_category": self.get_threats_by_category(),
+                "detailed_threats": self.threats
+            },
+            "network_intelligence": {
+                "urls": self.network_indicators.get('url', []),
+                "ips": self.network_indicators.get('ip', []),
+                "domains": self.network_indicators.get('domain', []),
+                "osint_data": self.osint_data
+            },
+            "native_analysis": {
+                "libraries_analyzed": len(self.native_data),
+                "details": self.native_data
+            },
+            "signature_analysis": {
+                "scanned": self.signature_info.get('scanned', False),
+                "hash_match": self.signature_info.get('hash_match'),
+                "yara_matches": self.signature_info.get('yara_matches'),
+                "fuzzy_match": self.signature_info.get('fuzzy_match')
+            },
+            "certificate_analysis": self.certificate_info,
+            "entropy_analysis": self.entropy_info,
+            "call_graph": self.call_graph,
+            "recommendations": self._generate_recommendations()
         }
         
-        report_path = self.ghidra_report_dir / f"{filename_prefix}_consolidated.json"
+        report_path = self.ghidra_report_dir / f"{filename_prefix}_full_report.json"
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(report_data, f, indent=2, ensure_ascii=False)
             
+        self._log(f"✓ Отчет сохранен: {report_path}")
         return report_path
+
+    def _generate_recommendations(self) -> List[str]:
+        recommendations = []
+        if self.risk_score >= 70:
+            recommendations.append("Рекомендуется немедленное удаление приложения.")
+            recommendations.append("Не предоставлять приложению никаких разрешений.")
+        if self.certificate_info.get('debug_cert'):
+            recommendations.append("Приложение подписано отладочным сертификатом. Не устанавливайте на основные устройства.")
+        if self.entropy_info.get('high_entropy_files'):
+            recommendations.append("Обнаружены признаки упаковки кода. Требуется дополнительный динамический анализ.")
+        if len(self.get_dangerous_permissions()) > 5:
+            recommendations.append("Приложение запрашивает избыточное количество опасных разрешений.")
+        if not recommendations:
+            recommendations.append("Специфических рекомендаций нет. Соблюдайте стандартные меры безопасности.")
+        return recommendations

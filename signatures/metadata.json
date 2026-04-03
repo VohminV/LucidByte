@@ -1,9 +1,8 @@
 {
-  "last_update": "2026-03-31T21:16:10.847552",
-  "sources_updated": [
-    "hash_database",
-    "yara_rules"
-  ],
+  "last_update": "2026-04-03T09:25:00.427805",
+  "sources_updated": [],
   "total_hashes": 0,
-  "total_rules": 0
+  "total_rules": 0,
+  "last_attempt": "2026-04-03T09:25:00.427805",
+  "sources_failed": 0
 }

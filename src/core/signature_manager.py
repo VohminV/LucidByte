@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 import logging
 import re
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -19,34 +20,28 @@ try:
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
+    logger.warning("Библиотека pyyaml не установлена. YAML конфигурация недоступна.")
 
 
 class SignatureManager:
     """Управление базой сигнатур для анализа угроз"""
     
-    # ✅ ИСПРАВЛЕНО: Только проверенные прямые ссылки на конкретные файлы
     DEFAULT_SOURCES = {
         'yara_rules': [
-            # Yara-Rules Repository (Конкретные существующие файлы)
             'https://raw.githubusercontent.com/Yara-Rules/rules/master/malware_index.yar',
             'https://raw.githubusercontent.com/Yara-Rules/rules/master/malware/APT_APT1.yar',
             'https://raw.githubusercontent.com/Yara-Rules/rules/master/malware/APT_APT28.yar',
             'https://raw.githubusercontent.com/Yara-Rules/rules/master/malware/Banker_QakBot.yar',
             'https://raw.githubusercontent.com/Yara-Rules/rules/master/malware/RAT_Remcos.yar',
             'https://raw.githubusercontent.com/Yara-Rules/rules/master/malware/Android_Malware.yar',
-            
-            # Neo23x0 Signature Base
             'https://raw.githubusercontent.com/Neo23x0/signature-base/master/yara/android_malware.yar',
             'https://raw.githubusercontent.com/Neo23x0/signature-base/master/yara/malware_microsoft_office.yar',
-            'https://raw.githubusercontent.com/Neo23x0/signature-base/master/yara/thor_inverse_match.yar',
-            
-            # Elastic Protections-Artifacts
             'https://raw.githubusercontent.com/elastic/protections-artifacts/main/yara/rules/Multi_Trojan_Gosar.yar',
             'https://raw.githubusercontent.com/elastic/protections-artifacts/main/yara/rules/Multi_Ransomware_Luna.yar',
         ],
         'hash_lists': []
     }
-    
+
     def __init__(self, signatures_dir: str = "signatures", config_path: str = "config.yaml"):
         self.signatures_dir = Path(signatures_dir)
         self.config_path = Path(config_path)
@@ -56,16 +51,15 @@ class SignatureManager:
         
         self.config = self._load_config()
         self._initialize_directories()
+        self._api_rate_limit_delay = 1.0  # Задержка между запросами к API
         
     def _load_config(self) -> Dict:
         """Загрузка конфигурации из файла (поддержка YAML и JSON)"""
         default_config = {
             'sources': self.DEFAULT_SOURCES,
             'update_interval_hours': 24,
-            'fuzzy_hash_threshold': 90,
             'enable_sha256_scan': True,
             'enable_yara_scan': True,
-            'enable_ssdeep_scan': True,
             'http_proxy': None,
             'https_proxy': None,
             'virustotal_api_key': None,
@@ -95,13 +89,13 @@ class SignatureManager:
             logger.error(f"Ошибка загрузки конфигурации: {e}")
         
         return default_config
-    
+
     def _initialize_directories(self):
         """Инициализация директорий для хранения сигнатур"""
         self.signatures_dir.mkdir(parents=True, exist_ok=True)
         self.rules_dir.mkdir(parents=True, exist_ok=True)
         self.hashes_dir.mkdir(parents=True, exist_ok=True)
-    
+
     def _get_metadata(self) -> Dict:
         """Получение метаданных последнего обновления"""
         if self.metadata_file.exists():
@@ -119,12 +113,12 @@ class SignatureManager:
             'last_attempt': None,
             'sources_failed': 0
         }
-    
+
     def _save_metadata(self, metadata: Dict):
         """Сохранение метаданных обновления"""
         with open(self.metadata_file, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
-    
+
     def needs_update(self) -> bool:
         """Проверка необходимости обновления базы сигнатур"""
         metadata = self._get_metadata()
@@ -139,7 +133,45 @@ class SignatureManager:
             return datetime.now() - last_update_dt > update_interval
         except Exception:
             return True
-    
+
+    def validate_api_keys(self) -> Dict[str, bool]:
+        """Проверка работоспособности ключей API"""
+        results = {
+            'malwarebazaar': False,
+            'virustotal': False
+        }
+        
+        mb_api_key = self.config.get('malwarebazaar_api_key')
+        if mb_api_key:
+            try:
+                url = 'https://bazaar.abuse.ch/api/v1/'
+                headers = {
+                    'API-Key': mb_api_key,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'User-Agent': 'LucidByte-Analyzer/1.0'
+                }
+                data = 'query=get_tags'
+                response = requests.post(url, headers=headers, data=data, timeout=10)
+                if response.status_code == 200:
+                    json_data = response.json()
+                    if json_data.get('query_status') == 'ok':
+                        results['malwarebazaar'] = True
+            except Exception as e:
+                logger.warning(f"Ошибка валидации MalwareBazaar API: {e}")
+        
+        vt_api_key = self.config.get('virustotal_api_key')
+        if vt_api_key:
+            try:
+                url = 'https://www.virustotal.com/api/v3/files/search?query=1'
+                headers = {'x-apikey': vt_api_key, 'Accept': 'application/json'}
+                response = requests.get(url, headers=headers, timeout=10)
+                if response.status_code in [200, 404]:  # 404 означает что ключ работает но файл не найден
+                    results['virustotal'] = True
+            except Exception as e:
+                logger.warning(f"Ошибка валидации VirusTotal API: {e}")
+        
+        return results
+
     def update_signatures(self, force: bool = False) -> Dict[str, Any]:
         """Обновление базы сигнатур из всех источников"""
         results = {
@@ -169,7 +201,7 @@ class SignatureManager:
                     results['sources_updated'].append('hash_database')
                 else:
                     results['sources_skipped'] += 1
-                    logger.info("⚠ Хеш-база: нет доступных источников без API ключа")
+                    logger.info("⚠ Хеш-база: нет доступных источников без ключа API")
             except Exception as e:
                 logger.warning(f"Ошибка обновления хеш-базы: {e}")
                 results['errors'].append(f"hash_database: {str(e)}")
@@ -206,7 +238,7 @@ class SignatureManager:
             logger.warning(f"⚠ Не удалось загрузить из {results['sources_failed']} источников")
         
         return results
-    
+
     def _update_hash_database(self) -> int:
         """Обновление базы хеш-сумм из доступных источников"""
         total_hashes = 0
@@ -243,12 +275,12 @@ class SignatureManager:
             placeholder_file = self.hashes_dir / "placeholder_hashes.txt"
             if not placeholder_file.exists():
                 with open(placeholder_file, 'w', encoding='utf-8') as f:
-                    f.write("# Placeholder - добавьте API ключи для загрузки хешей\n")
+                    f.write("# Placeholder - добавьте ключи API для загрузки хешей\n")
                     f.write("# Источники: MalwareBazaar, VirusTotal\n")
-                logger.info("Создан файл-заглушка для хешей (требуется API ключ)")
+                logger.info("Создан файл-заглушка для хешей (требуется ключ API)")
         
         return total_hashes
-    
+
     def _fetch_malwarebazaar_hashes(self, api_key: str, limit: int = 1000) -> List[str]:
         """Получение хешей из MalwareBazaar API"""
         hashes = []
@@ -259,35 +291,64 @@ class SignatureManager:
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'User-Agent': 'LucidByte-Analyzer/1.0'
             }
-            data = 'query=get_tags'
+            # Запрос последних вредоносных образцов
+            data = 'query=get_recent&selector=files'
             response = requests.post(url, headers=headers, data=data, timeout=30)
+            
             if response.status_code == 200:
                 json_data = response.json()
                 if json_data.get('query_status') == 'ok':
-                    pass 
+                    files = json_data.get('data', [])
+                    for file_info in files[:limit]:
+                        sha256 = file_info.get('sha256')
+                        if sha256:
+                            hashes.append(sha256.lower())
+                    
+                    time.sleep(self._api_rate_limit_delay)  # Rate limiting
         except Exception as e:
             logger.warning(f"MalwareBazaar API ошибка: {e}")
         return hashes
-    
+
     def _fetch_virustotal_hashes(self, api_key: str, limit: int = 1000) -> List[str]:
-        """Получение хешей из VirusTotal API"""
+        """Получение хешей из VirusTotal API с поддержкой пагинации"""
         hashes = []
+        cursor = None
+        fetched_count = 0
+        
         try:
-            url = 'https://www.virustotal.com/api/v3/files?limit=100'
-            headers = {'x-apikey': api_key, 'Accept': 'application/json'}
-            response = requests.get(url, headers=headers, timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                for item in data.get('data', []):
-                    sha256 = item.get('attributes', {}).get('sha256')
-                    if sha256:
-                        stats = item.get('attributes', {}).get('last_analysis_stats', {})
-                        if stats.get('malicious', 0) > 5:
-                            hashes.append(sha256.lower())
+            while fetched_count < limit:
+                url = 'https://www.virustotal.com/api/v3/files?limit=100'
+                if cursor:
+                    url += f'&cursor={cursor}'
+                
+                headers = {'x-apikey': api_key, 'Accept': 'application/json'}
+                response = requests.get(url, headers=headers, timeout=30)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    for item in data.get('data', []):
+                        sha256 = item.get('attributes', {}).get('sha256')
+                        if sha256:
+                            stats = item.get('attributes', {}).get('last_analysis_stats', {})
+                            if stats.get('malicious', 0) > 5:
+                                hashes.append(sha256.lower())
+                                fetched_count += 1
+                    
+                    # Пагинация
+                    meta = data.get('meta', {})
+                    cursor = meta.get('cursor')
+                    if not cursor:
+                        break
+                    
+                    time.sleep(self._api_rate_limit_delay)  # Rate limiting
+                else:
+                    logger.warning(f"VirusTotal API ошибка: {response.status_code}")
+                    break
         except Exception as e:
             logger.warning(f"VirusTotal API ошибка: {e}")
+        
         return hashes[:limit]
-    
+
     def _update_yara_rules(self) -> int:
         """Обновление базы YARA правил из открытых репозиториев"""
         total_rules = 0
@@ -303,8 +364,10 @@ class SignatureManager:
         for source_url in sources:
             try:
                 proxies = {}
-                if self.config.get('http_proxy'): proxies['http'] = self.config['http_proxy']
-                if self.config.get('https_proxy'): proxies['https'] = self.config['https_proxy']
+                if self.config.get('http_proxy'):
+                    proxies['http'] = self.config['http_proxy']
+                if self.config.get('https_proxy'):
+                    proxies['https'] = self.config['https_proxy']
                 
                 headers = {'User-Agent': 'LucidByte-Analyzer/1.0', 'Accept': 'text/plain,*/*'}
                 
@@ -312,7 +375,7 @@ class SignatureManager:
                 response = requests.get(source_url, timeout=30, proxies=proxies, headers=headers)
                 
                 if response.status_code == 200 and len(response.text) > 100:
-                    if 'rule ' in response.text or 'import ' in response.text or 'include ' in response.text:
+                    if 'rule' in response.text or 'import' in response.text or 'include' in response.text:
                         rule_filename = source_url.split('/')[-1]
                         if not rule_filename.endswith('.yar'):
                             rule_filename = f"rules_{hashlib.md5(source_url.encode()).hexdigest()[:8]}.yar"
@@ -321,7 +384,7 @@ class SignatureManager:
                         with open(rule_file, 'w', encoding='utf-8') as f:
                             f.write(response.text)
                         
-                        rule_count = response.text.count('rule ')
+                        rule_count = response.text.count('rule')
                         total_rules += rule_count
                         successful_downloads += 1
                         logger.info(f"✓ Загружено {rule_count} правил из {source_url}")
@@ -337,7 +400,9 @@ class SignatureManager:
                 else:
                     logger.warning(f"⚠ Ошибка загрузки ({response.status_code}): {source_url}")
                     failed_downloads += 1
-                    
+                
+                time.sleep(0.5)  # Rate limiting для GitHub
+                
             except requests.exceptions.Timeout:
                 logger.warning(f"⚠ Таймаут соединения: {source_url}")
                 failed_downloads += 1
@@ -353,7 +418,7 @@ class SignatureManager:
         
         logger.info(f"YARA правила: {successful_downloads} успешно, {failed_downloads} неудачно, {skipped_downloads} пропущено")
         return total_rules
-    
+
     def get_hash_database(self) -> List[str]:
         """Получение списка хешей из локальной базы"""
         hashes = []
@@ -368,18 +433,17 @@ class SignatureManager:
             except Exception as e:
                 logger.warning(f"Ошибка чтения файла хешей {hash_file}: {e}")
         return list(set(hashes))
-    
+
     def get_yara_rules_paths(self) -> List[Path]:
         """Получение путей ко всем YARA правилам"""
         return list(self.rules_dir.glob("*.yar"))
-    
-    def get_fuzzy_threshold(self) -> int:
-        return self.config.get('fuzzy_hash_threshold', 90)
-    
+
     def is_scan_enabled(self, scan_type: str) -> bool:
+        """Проверка включён ли тип сканирования"""
         return self.config.get(f'enable_{scan_type}_scan', True)
-    
+
     def get_status(self) -> Dict[str, Any]:
+        """Получение статуса менеджера сигнатур"""
         metadata = self._get_metadata()
         return {
             'last_update': metadata.get('last_update'),
@@ -388,7 +452,7 @@ class SignatureManager:
             'needs_update': self.needs_update(),
             'scan_enabled': {
                 'sha256': self.is_scan_enabled('sha256'),
-                'yara': self.is_scan_enabled('yara'),
-                'ssdeep': self.is_scan_enabled('ssdeep')
-            }
+                'yara': self.is_scan_enabled('yara')
+            },
+            'api_keys_valid': self.validate_api_keys()
         }

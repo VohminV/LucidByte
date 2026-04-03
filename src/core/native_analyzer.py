@@ -1,6 +1,5 @@
 """
-Анализатор Native Библиотек для PyGhidra
-Анализ .so библиотек через PyGhidra API (Python 3)
+Анализатор Native Библиотек для PYGHIDRA
 """
 import json
 import re
@@ -17,7 +16,7 @@ except ImportError:
 
 
 class NativeIndicatorExtractor:
-    """Извлечение индикаторов угроз из native библиотек через PyGhidra"""
+    """Извлечение индикаторов угроз из native библиотек через PYGHIDRA"""
     
     def __init__(self, program):
         self.program = program
@@ -27,15 +26,20 @@ class NativeIndicatorExtractor:
             "exports": [],
             "strings": [],
             "jni_functions": [],
-            "suspicious_names": []
+            "suspicious_names": [],
+            "syscalls": [],
+            "crypto_usage": [],
+            "anti_debug": []
         }
-    
+
     def extract_all(self) -> Dict[str, Any]:
         """Извлечь все индикаторы"""
         self._extract_functions()
         self._extract_imports()
         self._extract_exports()
         self._extract_strings()
+        self._detect_syscalls()
+        self._detect_anti_debug()
         return self.results
 
     def _extract_functions(self):
@@ -54,7 +58,7 @@ class NativeIndicatorExtractor:
                 })
             
             # Подозрительные имена
-            suspicious = ["crypto", "encrypt", "decrypt", "key", "secret", 
+            suspicious = ["crypto", "encrypt", "decrypt", "key", "secret",
                           "inject", "hook", "root", "su", "priv", "hide"]
             for kw in suspicious:
                 if kw in fname.lower():
@@ -81,7 +85,7 @@ class NativeIndicatorExtractor:
                 })
 
     def _extract_exports(self):
-        """Сбор экспортов (JNI entry points)"""
+        """Сбор экспортов (JNI точки входа)"""
         from ghidra.program.model.symbol import SourceType
         symbol_table = self.program.getSymbolTable()
         for symbol in symbol_table.getAllSymbols(True):
@@ -94,16 +98,18 @@ class NativeIndicatorExtractor:
                     })
 
     def _extract_strings(self):
-        """Извлечение строк из памяти"""
+        """Извлечение строк из памяти (ASCII и Unicode)"""
         mem = self.program.getMemory()
         for block in mem.getBlocks():
             if block.isInitialized() and block.isRead():
                 try:
                     size = min(2 * 1024 * 1024, int(block.getSize()))
                     data = block.getBytes(block.getStart(), size)
-                    strings = re.findall(b'[\x20-\x7E]{8,}', data)
+                    
+                    # ASCII строки
+                    ascii_strings = re.findall(b'[\x20-\x7E]{8,}', data)
                     count = 0
-                    for s in strings:
+                    for s in ascii_strings:
                         if count >= 50:
                             break
                         try:
@@ -114,14 +120,55 @@ class NativeIndicatorExtractor:
                                 count += 1
                         except:
                             pass
+                    
+                    # Unicode строки (UTF-16LE) - ДОБАВЛЕНО
+                    unicode_strings = re.findall(b'(?:[\x00][\x20-\x7E]){5,}', data)
+                    count = 0
+                    for s in unicode_strings:
+                        if count >= 50:
+                            break
+                        try:
+                            decoded = s.decode('utf-16-le', errors='ignore')
+                            keywords = ['http', 'https', '.so', '.apk', '192.168', '10.', '172.', 'api', 'token', 'key']
+                            if any(kw in decoded.lower() for kw in keywords):
+                                self.results["strings"].append(decoded[:150])
+                                count += 1
+                        except:
+                            pass
                 except:
                     pass
 
+    def _detect_syscalls(self):
+        """Обнаружение опасных системных вызовов"""
+        critical_syscalls = ["execve", "ptrace", "mmap", "protect", "connect", "sendto", "recvfrom"]
+        for imp in self.results["imports"]:
+            name_lower = imp["name"].lower()
+            for syscall in critical_syscalls:
+                if syscall in name_lower:
+                    self.results["syscalls"].append({
+                        "name": imp["name"],
+                        "type": syscall,
+                        "risk": "Critical"
+                    })
+
+    def _detect_anti_debug(self):
+        """Обнаружение признаков анти-отладки"""
+        anti_debug_patterns = ["ptrace", "getppid", "waitpid", "sigaction", "android_debuggable"]
+        for imp in self.results["imports"]:
+            name_lower = imp["name"].lower()
+            for pattern in anti_debug_patterns:
+                if pattern in name_lower:
+                    self.results["anti_debug"].append({
+                        "indicator": imp["name"],
+                        "pattern": pattern,
+                        "risk": "High"
+                    })
+
     def _assess_import_risk(self, import_name: str) -> str:
         """Оценка риска импортируемой функции"""
-        critical = ["exec", "system", "popen", "dlopen", "dlsym", "mmap", 
+        critical = ["exec", "system", "popen", "dlopen", "dlsym", "mmap",
                     "ptrace", "getuid", "setuid", "chmod", "chown", "kill", "fork"]
-        high = ["socket", "connect", "send", "recv", "open", "read", "write", 
+        high = ["socket", "connect", "send", "recv", "open", "read", "write",
                 "close", "ioctl", "fcntl", "getenv", "putenv"]
         
         name_lower = import_name.lower()
@@ -136,28 +183,28 @@ class NativeIndicatorExtractor:
 
 def analyze_native_library(lib_path: str, output_json: str, jvm_already_started: bool = False) -> Dict[str, Any]:
     """
-    Анализ одной native библиотеки через PyGhidra
+    Анализ одной native библиотеки через PYGHIDRA
     
-    Args:
+    Аргументы:
         lib_path: Путь к .so файлу
         output_json: Путь для сохранения результатов
-        jvm_already_started: Флаг указывающий, что Виртуальная Машина Java уже запущена
+        jvm_already_started: Флаг указывающий, что JVM уже запущена
     
-    Returns:
-        Dict с результатами анализа
+    Возвращает:
+        Словарь с результатами анализа
     """
     if not PYGHIDRA_AVAILABLE:
-        raise ImportError("PyGhidra не установлен. Выполните: pip install pyghidra")
-    
+        raise ImportError("PYGHIDRA не установлен. Выполните: pip install pyghidra")
+
     print(f"🔍 Анализ: {lib_path}")
 
     try:
-        # Открытие программы через PyGhidra
+        # Открытие программы через PYGHIDRA
         with pyghidra.open_program(lib_path, analyze=False) as flat_api:
-            # ✅ ИСПРАВЛЕНИЕ: Получение объекта Program из FlatProgramAPI
+            # Получение объекта Program из FlatProgramAPI
             program = flat_api.getCurrentProgram()
             
-            # Запуск анализа (теперь с правильным объектом Program)
+            # Запуск анализа
             print("  ▶ Запуск анализа...")
             pyghidra.analyze(program)
             
@@ -176,7 +223,7 @@ def analyze_native_library(lib_path: str, output_json: str, jvm_already_started:
             with open(output_json, "w", encoding="utf-8") as f:
                 json.dump(results, f, indent=2, ensure_ascii=False)
             
-            print(f"✓ Export: {len(results['functions'])} функций, "
+            print(f"✓ Экспорт: {len(results['functions'])} функций, "
                   f"{len(results['imports'])} импортов, "
                   f"{len(results['jni_functions'])} JNI")
             
@@ -184,13 +231,13 @@ def analyze_native_library(lib_path: str, output_json: str, jvm_already_started:
             
     except RuntimeError as e:
         if "Unable to start JVM" in str(e):
-            print("✗ Ошибка: Не удалось запустить Виртуальную Машину Java.")
+            print("✗ Ошибка: Не удалось запустить JVM.")
         raise e
 
 
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 3:
-        print("Usage: python native_analyzer.py <lib_path> <output_json>")
+        print("Использование: python native_analyzer.py <lib_path> <output_json>")
         sys.exit(1)
     analyze_native_library(sys.argv[1], sys.argv[2])

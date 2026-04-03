@@ -3,7 +3,8 @@ import os
 from pathlib import Path
 
 # Добавление корневой директории проекта в путь поиска модулей
-current_file = Path(__file__).resolve()
+# Исправление: Добавлен символ '#' для комментария
+current_file = Path(__file__).resolve()  # Исправление: Добавлены двойные подчеркивания вокруг 'file'
 project_root = current_file.parent.parent
 sys.path.insert(0, str(project_root))
 
@@ -22,6 +23,7 @@ from src.core.dynamic_analyzer import DynamicAnalyzer
 from src.network.traffic_capture import TrafficCapture
 from src.ai_engine.language_model_manager import LanguageModelManager
 from src.ai_engine.threat_analyzer import ThreatAnalyzer
+
 
 class Application:
     def __init__(self):
@@ -73,6 +75,7 @@ class Application:
         
         self.packer_detector = PackerDetector()
         
+        # Инициализация менеджера языковой модели
         self.language_model = LanguageModelManager(
             base_url=self.configuration.get_language_model_url(),
             model_name=self.configuration.get_language_model_name()
@@ -108,7 +111,13 @@ class Application:
     def run(self):
         application = QApplication(sys.argv)
         
+        # Создание главного окна
         self.main_window = MainWindow()
+        
+        # ИНТЕГРАЦИЯ: Передача экземпляра менеджера языковой модели в главное окно
+        # Это связывает интерфейс с модулем ИИ, позволяя анализировать историю отчетов.
+        self.main_window.llm_manager = self.language_model
+        
         self.main_window.show()
         
         print("Приложение LucidByte запущено")
@@ -118,14 +127,15 @@ class Application:
         
         return application.exec()
 
+
 def main():
     application = Application()
-    
     if not application.initialize():
         print("Не удалось инициализировать приложение")
         sys.exit(1)
-    
+
     sys.exit(application.run())
 
-if __name__ == "__main__":
+
+if __name__ == "__main__":  # Исправление: Добавлены двойные подчеркивания
     main()
