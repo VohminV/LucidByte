@@ -596,28 +596,77 @@ class AnalysisEngine:
         self._log("Завершение анализа собственных бинарных библиотек.")
 
     def _parse_manifest_fast(self):
-        manifest_path = next((p for p in [self.decompiled_directory / "AndroidManifest.xml", self.decompiled_directory / "jadx_sources" / "AndroidManifest.xml"] if p.exists()), None)
-        if not manifest_path:
-            self._log("AndroidManifest.xml не найден.")
+        """Поиск и парсинг AndroidManifest.xml с жёсткой привязкой к структуре JADX."""
+        # Приоритетный перечень путей в порядке убывания вероятности присутствия файла
+        possible_paths = [
+            self.decompiled_directory / "jadx_sources" / "resources" / "AndroidManifest.xml",
+            self.decompiled_directory / "jadx_sources" / "AndroidManifest.xml",
+            self.decompiled_directory / "resources" / "AndroidManifest.xml",
+            self.decompiled_directory / "AndroidManifest.xml",
+        ]
+        
+        manifest_path = None
+        for path in possible_paths:
+            if path.exists() and path.is_file():
+                manifest_path = path
+                self._log(f"✓ Манифест обнаружен: {path.relative_to(self.decompiled_directory)}")
+                break
+        
+        if manifest_path is None:
+            # Расширенный поиск по всем подкаталогам декомпилированного проекта
+            for xml_path in self.decompiled_directory.rglob("AndroidManifest.xml"):
+                if xml_path.is_file():
+                    manifest_path = xml_path
+                    self._log(f"✓ Манифест обнаружен (рекурсивный поиск): {xml_path.relative_to(self.decompiled_directory)}")
+                    break
+        
+        if manifest_path is None:
+            self._log("⚠️ AndroidManifest.xml не найден ни в одном из ожидаемых каталогов.")
             return
+        
         try:
-            with open(manifest_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-            if '<manifest' not in content:
-                self._log("Содержимое манифеста невалидно.")
+            # Чтение с автоматической обработкой кодировок
+            content = manifest_path.read_text(encoding='utf-8', errors='ignore')
+            
+            # Проверка на бинарный AXML-формат (признак: начинается с нулевых байтов или отсутствует тег <manifest)
+            if content.startswith('\x00\x00') or '<manifest' not in content[:1000]:
+                self._log("⚠️ Манифест сохранён в бинарном формате AXML. Пропуск текстового парсинга.")
                 return
+            
             self.manifest_data = content
-            permissions_set = set(re.findall(r'(?:android:)?name="(android\.[^"]+)"', content, re.I))
+            
+            # Извлечение разрешений с поддержкой пространства имён android:
+            permissions_set = set()
+            patterns = [
+                r'(?:android:)?name=["\']?(android\.permission\.[^"\'\s>]+)["\']?',
+                r'(?:android:)?name=["\']?([^"\'\s>]+)["\']?'
+            ]
+            
+            for pattern in patterns:
+                for perm in re.findall(pattern, content, re.I):
+                    if perm and not perm.startswith('android:'):
+                        permissions_set.add(perm)
+            
             self.permissions = []
             for perm in sorted(permissions_set):
-                risk = "Critical" if any(k in perm for k in ['READ_SMS', 'BIND_ACCESSIBILITY']) else "High" if any(k in perm for k in ['ACCESS_FINE_LOCATION', 'RECORD_AUDIO']) else "Low"
+                risk = "Critical" if any(k in perm for k in ['READ_SMS', 'BIND_ACCESSIBILITY', 'BIND_DEVICE_ADMIN']) else \
+                       "High" if any(k in perm for k in ['ACCESS_FINE_LOCATION', 'RECORD_AUDIO', 'SYSTEM_ALERT_WINDOW']) else "Low"
                 self.permissions.append({"name": perm, "risk": risk, "category": "System"})
                 if risk == "Critical":
-                    self.threats.append({"source": "manifest", "pattern": perm, "risk": "Critical", "desc": f"Опасное разрешение: {perm}", "category": "Permission"})
-            pkg_match = re.search(r'(?:android:)?package="([^"]+)"', content)
+                    self.threats.append({
+                        "source": "manifest", "pattern": perm, "risk": "Critical",
+                        "desc": f"Опасное разрешение: {perm}", "category": "Permission"
+                    })
+            
+            # Парсинг базовых метаданных
+            pkg_match = re.search(r'(?:android:)?package=["\']?([^"\'\s>]+)["\']?', content)
             self.manifest_info['package'] = pkg_match.group(1) if pkg_match else "Unknown"
-        except Exception as e:
-            self._log(f"Ошибка парсинга манифеста: {e}")
+            
+            self._log(f"✓ Манифест обработан. Пакет: {self.manifest_info['package']}, Разрешений: {len(self.permissions)}")
+            
+        except Exception as exception:
+            self._log(f"❌ Ошибка парсинга манифеста: {exception}")
+            self.manifest_info['package'] = "Unknown"
 
     def _extract_open_source_intelligence_resources(self):
         self._log("Анализ ресурсов приложения...")
@@ -854,54 +903,74 @@ class AnalysisEngine:
         elif risk_score >= 30: return "Suspicious"
         return "Safe"
     
-    def save_consolidated_report(self, filename_prefix: str) -> Path:
+    def save_consolidated_report(self, filename_prefix: str = None) -> Path:
+        """Сохранение отчёта с динамическим именем на основе пакета из манифеста."""
+        
+        # 1. Формируем безопасное имя файла
+        if filename_prefix:
+            base_name = filename_prefix
+        else:
+            pkg = self.manifest_info.get('package', '')
+            if pkg and pkg != 'Unknown':
+                # Заменяем точки и спецсимволы на подчёркивания для безопасности ФС
+                base_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', pkg)
+            elif self.application_package_path:
+                base_name = self.application_package_path.stem
+            else:
+                base_name = 'analysis_report'
+
+        # Гарантируем уникальность, добавляя timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        final_filename = f"{base_name}_{timestamp}_full_report.json"
+        report_path = self.reports_directory / final_filename
+
+        # 2. Безопасный доступ к вложенным данным
         def safe_get(obj, *keys, default=None):
             for key in keys:
                 if obj is None: return default
                 obj = obj.get(key, default) if isinstance(obj, dict) else default
             return obj if obj is not None else default
 
+        # 3. Подготовка угроз с MITRE
         threats_with_mitre = []
         for threat in self.threats:
-            threat_copy = threat.copy() if threat else {}
-            category = threat_copy.get("category", "") if threat_copy else ""
-            threat_copy['mitre_technique_id'] = MitreAttackMobileMapper.map_category_to_technique(category)
-            threats_with_mitre.append(threat_copy)
+            t_copy = threat.copy()
+            cat = t_copy.get("category", "")
+            t_copy['mitre_technique_id'] = MitreAttackMobileMapper.map_category_to_technique(cat)
+            threats_with_mitre.append(t_copy)
 
-        file_name = "Unknown"
-        if self.application_package_path is not None:
-            try: file_name = self.application_package_path.name
-            except Exception: file_name = "Unknown"
-        file_hash = safe_get(self.signature_info, 'hash_match', 'value', default='Not Scanned')
-
+        # 4. Формирование структуры отчёта
         report_data = {
-            "report_metadata": {"generated_at": datetime.now().isoformat(), "analyzer_version": "2.0.0", "analyzer_name": "Аналитический Движок Для Статического Анализа"},
-            "summary": {"file_name": file_name, "file_hash": file_hash, "risk_score": self.risk_score if self.risk_score is not None else 0, "verdict": self._calculate_verdict(self.risk_score), "total_files": len(self.get_decompiled_files()), "total_threats": len(threats_with_mitre), "total_permissions": len(self.permissions)},
+            "report_metadata": {"generated_at": datetime.now().isoformat(), "analyzer_version": "2.0.0", "analyzer_name": "LucidByte Static Engine"},
+            "summary": {
+                "file_name": self.application_package_path.name if self.application_package_path else "Unknown",
+                "package_name": self.manifest_info.get('package', 'Unknown'),
+                "risk_score": self.risk_score, "verdict": self._calculate_verdict(self.risk_score),
+                "total_files": len(self.get_decompiled_files()), "total_threats": len(threats_with_mitre),
+                "total_permissions": len(self.permissions)
+            },
             "threats": threats_with_mitre, "permissions": self.permissions,
-            "application_info": {"package_name": safe_get(self.manifest_info, 'package', default='N/A'), "version": safe_get(self.manifest_info, 'version', default='N/A'), "target_sdk": safe_get(self.manifest_info, 'target_sdk', default='N/A'), "debuggable": safe_get(self.manifest_info, 'debuggable', default=False), "components": self.manifest_info.get('components', {}) if self.manifest_info else {}},
-            "permissions_analysis": {"total_count": len(self.permissions) if self.permissions else 0, "dangerous_permissions": [p for p in (self.permissions or []) if p.get("risk") in ["Critical", "High"]], "all_permissions": self.permissions or []},
-            "threats_detected": {"total_count": len(threats_with_mitre), "critical_count": len([t for t in threats_with_mitre if t.get("risk") == "Critical"]), "threats_by_category": self.get_threats_by_category(), "detailed_threats": threats_with_mitre},
-            "network_intelligence": {"urls": self.network_indicators.get('url', []) if self.network_indicators else [], "ips": self.network_indicators.get('ip', []) if self.network_indicators else [], "domains": self.network_indicators.get('domain', []) if self.network_indicators else [], "osint_data": self.osint_data or {}, "flags": safe_get(self.osint_data, 'network_flags', default={})},
-            "taint_analysis": {"sources_sinks": len(self.taint_flows) if self.taint_flows else 0, "flows": self.taint_flows or []},
-            "native_analysis": {"libraries_analyzed": len(self.native_data) if self.native_data else 0, "details": self.native_data or {}},
-            "signature_analysis": self.signature_info or {}, "certificate_analysis": self.certificate_info or {},
-            "entropy_analysis": self.entropy_info or {}, "crypto_analysis": self.crypto_findings or [],
-            "anti_analysis": self.anti_analysis_findings or [], "behavioral_chains": self.behavioral_chains or [],
-            "unpacking_indicators": self.unpacking_indicators or [],
-            "privacy_compliance": {"violations": self.privacy_violations or [], "data_minimization_score": "Pass" if not self.privacy_violations else "Fail"},
-            "dynamic_analysis_preparation": self.dynamic_analysis_config or {}, "machine_learning_features": self.ml_features or {},
-            "call_graph": self.call_graph or {}, "recommendations": self._generate_recommendations()
+            "application_info": {"package": self.manifest_info.get('package', 'N/A'), "debuggable": self.manifest_info.get('debuggable', False)},
+            "network_intelligence": {"urls": self.network_indicators.get('url', []), "ips": self.network_indicators.get('ip', []), "flags": self.osint_data.get('network_flags', {})},
+            "taint_analysis": {"flows": self.taint_flows},
+            "native_analysis": {"libraries_analyzed": len(self.native_data)},
+            "crypto_analysis": self.crypto_findings, "anti_analysis": self.anti_analysis_findings,
+            "behavioral_chains": self.behavioral_chains, "unpacking_indicators": self.unpacking_indicators,
+            "privacy_compliance": {"violations": self.privacy_violations},
+            "dynamic_analysis_preparation": self.dynamic_analysis_config,
+            "recommendations": self._generate_recommendations()
         }
+
+        # 5. Сохранение
         try:
-            self.ghidra_report_directory.mkdir(parents=True, exist_ok=True)
-            report_path = self.reports_directory / f"{filename_prefix}_full_report.json"
-            with open(report_path, 'w', encoding='utf-8') as file_handle:
-                json.dump(report_data, file_handle, indent=2, ensure_ascii=False)
-            self._log(f"✓ Отчёт сохранён: {report_path.resolve()}")
+            self.reports_directory.mkdir(parents=True, exist_ok=True)
+            with open(report_path, 'w', encoding='utf-8') as f:
+                json.dump(report_data, f, indent=2, ensure_ascii=False)
+            self._log(f"✅ Отчёт сохранён: {report_path.name}")
             return report_path
         except Exception as error:
-            self._log(f"✗ Ошибка сохранения отчёта: {error}")
-            return self.ghidra_report_directory / f"{filename_prefix}_full_report.json"
+            self._log(f"❌ Ошибка сохранения отчёта: {error}")
+            return self.reports_directory / f"fallback_{timestamp}_full_report.json"
 
     def _generate_recommendations(self) -> List[str]:
         recommendations = []
