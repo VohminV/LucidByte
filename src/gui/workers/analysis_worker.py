@@ -1,32 +1,36 @@
 """
 Рабочий поток для анализа пакета приложения
-Назначение: Асинхронное выполнение анализа в отдельном потоке
+Назначение: Асинхронное выполнение анализа в отдельном потоке,
+интеграция с расширенными модулями AnalysisEngine и управление жизненным циклом ресурсов.
 """
 from PySide6.QtCore import QThread, Signal
 from typing import List, Dict, Optional
-from pathlib import Path
 import traceback
-from src.core.analysis_engine import AnalysisEngine
+import logging
+
+try:
+    from src.core.analysis_engine import AnalysisEngine
+except ImportError:
+    try:
+        from analysis_engine import AnalysisEngine
+    except ImportError:
+        print("Ошибка: Не удалось импортировать AnalysisEngine. Проверьте пути.")
+        AnalysisEngine = None
+
+logger = logging.getLogger(__name__)
 
 class AnalysisWorker(QThread):
-    """
-    Рабочий поток для анализа пакетов приложений
-    Режим: Полноценный Реверс-Инженеринг Мобильных Систем
-    """
-    # ==================== СИГНАЛЫ ПРОГРЕССА ====================
+    """Рабочий поток для анализа пакетов приложений"""
     progress = Signal(int, str)
     log_signal = Signal(str)
     finished = Signal(bool)
 
-    # ==================== СИГНАЛЫ ДАННЫХ ====================
     manifest_ready = Signal(str, dict)
     strings_ready = Signal(list)
     permissions_ready = Signal(list)
     threats_ready = Signal(list)
     files_ready = Signal(list)
     stats_ready = Signal(dict)
-
-    # Сигналы расширенных модулей
     graph_ready = Signal(dict, list)
     report_ready = Signal(str)
     network_ready = Signal(dict)
@@ -34,143 +38,138 @@ class AnalysisWorker(QThread):
     osint_ready = Signal(dict)
     native_ready = Signal(dict)
     risk_ready = Signal(int)
-    
-    # Новые сигналы для расширенного анализа
+
     taint_ready = Signal(list)
     behavioral_chains_ready = Signal(list)
     crypto_ready = Signal(list)
     anti_analysis_ready = Signal(list)
     structure_ready = Signal(list)
-    
-    # Сигналы новых модулей
-    privacy_ready = Signal(list)
+    privacy_ready = Signal(list) 
     unpacking_ready = Signal(list)
     dynamic_config_ready = Signal(dict)
     ml_features_ready = Signal(dict)
 
     def __init__(self, application_package_path: str):
-        """
-        Инициализация рабочего потока
-        Аргументы:
-            application_package_path: Путь к пакету приложения для анализа
-        """
         super().__init__()
         self.application_package_path = application_package_path
-        self.engine = AnalysisEngine()
-        self.engine.enable_ghidra(True)
-        self.engine.set_progress_callback(self._on_progress)
-        self.engine.set_log_callback(self._on_log)
+        if AnalysisEngine:
+            self.engine = AnalysisEngine()
+            self.engine.enable_ghidra(True)
+            self.engine.set_progress_callback(self._on_progress)
+            self.engine.set_log_callback(self._on_log)
+        else:
+            self.engine = None
+            self._on_log("КРИТИЧЕСКАЯ ОШИБКА: Движок анализа не загружен.")
 
     def _on_progress(self, value: int, message: str):
-        self.progress.emit(value, message)
+        try: self.progress.emit(value, message)
+        except Exception: pass
 
     def _on_log(self, message: str):
-        self.log_signal.emit(message)
+        try: self.log_signal.emit(message)
+        except Exception: pass
 
     def run(self):
+        if not self.engine:
+            self.finished.emit(False)
+            return
+
         try:
             self._log("Запуск рабочего потока анализа...")
             success = self.engine.analyze_application_package(self.application_package_path)
             
             if success:
-                self._log("Анализ завершён")
-                self.manifest_ready.emit(self.engine.manifest_data, self.engine.manifest_info)
-                self.strings_ready.emit(self.engine.strings_data)
-                self.permissions_ready.emit(self.engine.permissions)
-                self.threats_ready.emit(self.engine.threats)
-                self.files_ready.emit([str(file_path) for file_path in self.engine.get_decompiled_files()])
-                self.stats_ready.emit(self.engine.get_statistics())
+                self._log("Анализ завершён. Сбор и передача данных...")
                 
+                try: self.manifest_ready.emit(self.engine.manifest_data, self.engine.manifest_info)
+                except Exception: pass
+                try: self.strings_ready.emit(self.engine.strings_data)
+                except Exception: pass
+                try: self.permissions_ready.emit(self.engine.permissions)
+                except Exception: pass
+                try: self.threats_ready.emit(self.engine.threats)
+                except Exception: pass
+                try: self.files_ready.emit([str(file_path) for file_path in self.engine.get_decompiled_files()])
+                except Exception: pass
+                try: self.stats_ready.emit(self.engine.get_statistics())
+                except Exception: pass
+
                 try:
                     graph_data = self.engine.get_call_graph_data()
                     self.graph_ready.emit(graph_data, self.engine.threats)
-                except Exception as error:
-                    self.graph_ready.emit({}, [])
-                
-                try:
-                    self.network_ready.emit(self.engine.get_network_indicators())
-                except Exception:
-                    self.network_ready.emit({})
-                
-                try:
-                    self.signature_ready.emit(self.engine.get_signature_info())
-                except Exception:
-                    self.signature_ready.emit({})
-                
-                try:
-                    self.osint_ready.emit(self.engine.get_osint_data())
-                except Exception:
-                    self.osint_ready.emit({})
-                
-                try:
-                    self.native_ready.emit(self.engine.get_native_analysis_results())
-                except Exception:
-                    self.native_ready.emit({})
-                
-                try:
-                    self.risk_ready.emit(self.engine.get_risk_score())
-                except Exception:
-                    self.risk_ready.emit(0)
-                    
-                try:
-                    self.taint_ready.emit(self.engine.get_taint_flows())
-                except Exception:
-                    self.taint_ready.emit([])
-                    
-                try:
-                    self.behavioral_chains_ready.emit(self.engine.get_behavioral_chains())
-                except Exception:
-                    self.behavioral_chains_ready.emit([])
+                except Exception: self.graph_ready.emit({}, [])
 
-                try:
-                    self.privacy_ready.emit(self.engine.get_privacy_violations())
-                except Exception:
-                    self.privacy_ready.emit([])
-                    
-                try:
-                    self.unpacking_ready.emit(self.engine.get_unpacking_indicators())
-                except Exception:
-                    self.unpacking_ready.emit([])
-                    
-                try:
-                    self.dynamic_config_ready.emit(self.engine.get_dynamic_analysis_config())
-                except Exception:
-                    self.dynamic_config_ready.emit({})
-                    
-                try:
-                    self.ml_features_ready.emit(self.engine.ml_features)
-                except Exception:
-                    self.ml_features_ready.emit({})
+                try: self.network_ready.emit(self.engine.get_network_indicators())
+                except Exception: pass
+                try: self.osint_ready.emit(self.engine.get_osint_data())
+                except Exception: pass
+                try: self.signature_ready.emit(self.engine.get_signature_info())
+                except Exception: pass
+                try: self.native_ready.emit(self.engine.get_native_analysis_results())
+                except Exception: pass
+                try: self.risk_ready.emit(self.engine.get_risk_score())
+                except Exception: pass
 
+                try: self.taint_ready.emit(self.engine.get_taint_flows())
+                except Exception: pass
+                try: self.behavioral_chains_ready.emit(self.engine.get_behavioral_chains())
+                except Exception: pass
+                try: self.crypto_ready.emit(self.engine.crypto_findings)
+                except Exception: pass
+                try: self.anti_analysis_ready.emit(self.engine.anti_analysis_findings)
+                except Exception: pass
+                try: self.structure_ready.emit(self.engine.structure_findings)
+                except Exception: pass
+                try: self.privacy_ready.emit(self.engine.get_privacy_violations())
+                except Exception: pass
+                try: self.unpacking_ready.emit(self.engine.get_unpacking_indicators())
+                except Exception: pass
+                try: self.dynamic_config_ready.emit(self.engine.get_dynamic_analysis_config())
+                except Exception: pass
+                try: self.ml_features_ready.emit(self.engine.ml_features)
+                except Exception: pass
+
+                # Сохранение итогового отчёта и отправка в историю
                 try:
                     report_path = self.engine.save_consolidated_report("analysis_results")
                     self.report_ready.emit(str(report_path))
+                    self._log(f"✅ Итоговый отчёт сохранён и передан в интерфейс.")
                 except Exception as error:
-                    self._log(f"Не удалось сохранить отчёт: {error}")
+                    self._log(f"Не удалось сохранить консолидированный отчёт: {error}")
                 
                 self._log("=" * 70)
                 self._log("РЕЗУЛЬТАТЫ")
-                critical_count = len([threat for threat in self.engine.threats if threat.get('risk') == 'Critical'])
-                high_count = len([threat for threat in self.engine.threats if threat.get('risk') == 'High'])
-                self._log(f"Критических: {critical_count}")
-                self._log(f"Высоких: {high_count}")
                 self._log(f"Риск: {self.engine.get_risk_score()}/100")
-                self._log(f"Признаков машинного обучения: {len(self.engine.ml_features)}")
                 self._log("=" * 70)
             
             self.finished.emit(success)
             
         except Exception as exception:
             error_trace = traceback.format_exc()
-            self.log_signal.emit(f"Ошибка: {str(exception)}")
-            self.log_signal.emit(f"Трассировка:\n{error_trace}")
+            self._log(f"КРИТИЧЕСКАЯ ОШИБКА ПОТОКА: {str(exception)}")
+            self._log(f"Трассировка:\n{error_trace}")
             self.finished.emit(False)
+        finally:
+            self.cleanup_resources()
 
-    def _log(self, message: str):
-        self.log_signal.emit(message)
+    def cleanup_resources(self):
+        if hasattr(self, 'engine') and self.engine:
+            try:
+                self._log("Освобождение ресурсов (Temp files, Ghidra sessions)...")
+                self.engine.cleanup_resources()
+            except Exception as e:
+                logger.warning(f"Ошибка при очистке ресурсов: {e}")
 
     def stop_analysis(self):
-        if self.isRunning():
-            self._log("Остановка...")
-            self.terminate()
-            self.wait(5000)
+        if not self.isRunning(): return
+        self._log("🛑 Запрос остановки анализа...")
+        if hasattr(self.engine, '_stop_flag'): self.engine._stop_flag = True
+        self.terminate()
+        if not self.wait(5000): self._log("⚠ Предупреждение: поток не завершился вовремя")
+        try:
+            if hasattr(self, 'engine') and self.engine: self.engine.cleanup_resources()
+        except Exception as e: self._log(f"⚠ Ошибка при очистке ресурсов: {e}")
+        self._log("✅ Анализ остановлен, ресурсы освобождены")
+
+    def __del__(self): self.cleanup_resources()
+    def _log(self, message: str): self.log_signal.emit(message)
